@@ -34,6 +34,7 @@ import (
 	_ "github.com/containerd/containerd/services/introspection"
 	_ "github.com/containerd/containerd/services/leases"
 	_ "github.com/containerd/containerd/services/namespaces"
+	_ "github.com/containerd/containerd/services/network"
 	_ "github.com/containerd/containerd/services/opt"
 	_ "github.com/containerd/containerd/services/sandbox"
 	_ "github.com/containerd/containerd/services/snapshots"
