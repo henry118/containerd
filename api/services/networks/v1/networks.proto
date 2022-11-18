@@ -1,0 +1,180 @@
+/*
+	Copyright The containerd Authors.
+	Licensed under the Apache License, Version 2.0 (the "License");
+	you may not use this file except in compliance with the License.
+	You may obtain a copy of the License at
+		http://www.apache.org/licenses/LICENSE-2.0
+	Unless required by applicable law or agreed to in writing, software
+	distributed under the License is distributed on an "AS IS" BASIS,
+	WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+	See the License for the specific language governing permissions and
+	limitations under the License.
+*/
+
+syntax = "proto3";
+
+package containerd.services.networks.v1;
+
+import "google/protobuf/any.proto";
+import "google/protobuf/empty.proto";
+
+option go_package = "github.com/containerd/containerd/api/services/networks/v1;networks";
+
+service Network {
+	rpc CreateNetwork(CreateNetworkRequest) returns (google.protobuf.Empty);
+        rpc DeleteNetwork(DeleteNetworkRequest) returns (google.protobuf.Empty);
+        rpc GetNetwork(GetNetworkRequest) returns (GetNetworkResponse);
+        rpc ListNetworks(ListNetworksRequest) returns (ListNetworksResponse);
+	rpc AttachNetwork(AttachNetworkRequest) returns (AttachNetworkResponse);
+	rpc DetachNetwork(DetachNetworkRequest) returns (google.protobuf.Empty);
+	rpc GetAttachment(GetAttachmentRequest) returns (GetAttachmentResponse);
+	rpc CheckAttachment(CheckAttachmentRequest) returns (CheckAttachmentResponse);
+	rpc ListAttachments(ListAttachmentsRequest) returns (ListAttachmentsResponse);
+}
+
+enum NetworkConfigType {
+	NC_UNKNOWN = 0;
+	NC_CONF = 1;
+	NC_CONFLIST = 2;
+}
+
+message NetworkConfig {
+	NetworkConfigType type = 1;
+	string name = 2;
+	bytes data = 3;
+}
+
+message CreateNetworkRequest {
+	string network_manager = 1;
+	string network_name = 2;
+	NetworkConfig network_config = 3;
+}
+
+message DeleteNetworkRequest {
+	string network_manager = 1;
+	string network_name = 2;
+}
+
+message GetNetworkRequest {
+	string network_manager = 1;
+	string network_name = 2;
+}
+
+message GetNetworkResponse {
+	string network_manager = 1;
+	NetworkConfig network_config = 2;
+}
+
+message ListNetworksRequest {
+	string network_manager = 1;
+}
+
+message ListNetworksResponse {
+	string network_manager = 1;
+	repeated NetworkConfig networks = 2;
+}
+
+enum AttachmentArgumentType {
+	AA_UNKNOWN = 0;
+	AA_PLUGIN = 1;
+	AA_CAPABILITY = 2;
+}
+
+message AttachmentArgument {
+	AttachmentArgumentType type = 1;
+	string name = 2;
+	google.protobuf.Any value = 3;
+}
+
+message AttachNetworkRequest {
+	string network_manager = 1;
+	string network_name = 2;
+	string container = 3;
+	string netns = 4;
+	string ifname = 5;
+	repeated AttachmentArgument args = 6;
+}
+
+message AttachNetworkResponse {
+	string network_manager = 1;
+	NetworkAttachment attachment = 2;
+}
+
+message DetachNetworkRequest {
+	string network_manager = 1;
+	string network_name = 2;
+	string attachment_id = 3;
+}
+
+message GetAttachmentRequest {
+	string network_manager = 1;
+	string network_name = 2;
+	string attachment_id = 3;
+}
+
+message DNS {
+	repeated string name_servers = 1;
+	string domain = 2;
+	repeated string search = 3;
+	repeated string options = 4;
+}
+
+message Route {
+	string ip = 1;
+	string mask = 2;
+	string gateway = 3;
+}
+
+message IPConfig {
+	string ip = 1;
+	string gateway = 2;
+}
+
+message Interface {
+	string name = 1;
+	repeated IPConfig ips = 2;
+	string mac = 3;
+	string sandbox = 4;
+}
+
+message NetworkAttachment {
+	string id = 1;
+	string network_name = 2;
+	string container = 3;
+	string netns = 4;
+	string ifname = 5;
+	DNS dns = 8;
+	repeated Interface interfaces = 6;
+	repeated Route routes = 7;
+}
+
+message GetAttachmentResponse {
+	string network_manager = 1;
+	NetworkAttachment attachment = 3;
+}
+
+message CheckAttachmentRequest {
+	string network_manager = 1;
+	string network_name = 2;
+	string attachment_id = 3;
+}
+
+message CheckAttachmentResponse {
+	string network_manager = 1;
+	string network_name = 2;
+	string attachment_id = 3;
+	bool ok = 4;
+}
+
+message ListAttachmentsRequest {
+	string network_manager = 1;
+	string network_name = 2;
+	optional string container = 3;
+	optional string ifname = 4;
+}
+
+message ListAttachmentsResponse {
+	string network_manager = 1;
+	repeated NetworkAttachment attachments = 2;
+}
+

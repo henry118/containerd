@@ -35,6 +35,7 @@ import (
 	introspectionapi "github.com/containerd/containerd/api/services/introspection/v1"
 	leasesapi "github.com/containerd/containerd/api/services/leases/v1"
 	namespacesapi "github.com/containerd/containerd/api/services/namespaces/v1"
+	networksapi "github.com/containerd/containerd/api/services/networks/v1"
 	sandboxsapi "github.com/containerd/containerd/api/services/sandbox/v1"
 	snapshotsapi "github.com/containerd/containerd/api/services/snapshots/v1"
 	"github.com/containerd/containerd/api/services/tasks/v1"
@@ -50,6 +51,7 @@ import (
 	"github.com/containerd/containerd/leases"
 	leasesproxy "github.com/containerd/containerd/leases/proxy"
 	"github.com/containerd/containerd/namespaces"
+	"github.com/containerd/containerd/networks"
 	"github.com/containerd/containerd/pkg/dialer"
 	"github.com/containerd/containerd/platforms"
 	"github.com/containerd/containerd/plugin"
@@ -865,4 +867,17 @@ func toPlatforms(pt []*apitypes.Platform) []ocispec.Platform {
 		}
 	}
 	return platforms
+}
+
+func (c *Client) NetworkManager(name string) networks.Manager {
+	return NewNetworkManager(name, c)
+}
+
+func (c *Client) NetworkService(networkManager string) networks.Service {
+	if c.networkServices != nil {
+		return c.networkServices[networkManager]
+	}
+	c.connMu.Lock()
+	defer c.connMu.Unlock()
+	return networks.NewProxy(networkManager, networksapi.NewNetworkClient(c.conn))
 }

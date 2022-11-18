@@ -31,6 +31,7 @@ import (
 	"github.com/containerd/containerd/images"
 	"github.com/containerd/containerd/leases"
 	"github.com/containerd/containerd/namespaces"
+	"github.com/containerd/containerd/networks"
 	"github.com/containerd/containerd/plugin"
 	"github.com/containerd/containerd/sandbox"
 	"github.com/containerd/containerd/sandbox/proxy"
@@ -52,6 +53,7 @@ type services struct {
 	introspectionService introspection.Service
 	sandboxStore         sandbox.Store
 	sandboxController    sandbox.Controller
+	networkServices      map[string]networks.Service
 }
 
 // ServicesOpt allows callers to set options on the services

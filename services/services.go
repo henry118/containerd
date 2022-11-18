@@ -39,4 +39,6 @@ const (
 	SandboxControllerService = "sandbox-controller-service"
 	// Streaming service is the id of the streaming service
 	StreamingService = "streaming-service"
+	// NetworkService is the id of network service
+	NetworkService = "network-service"
 )

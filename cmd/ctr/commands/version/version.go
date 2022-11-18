@@ -58,6 +58,10 @@ var Command = cli.Command{
 		if v.Revision != version.Revision {
 			fmt.Fprintln(os.Stderr, "WARNING: revision mismatch")
 		}
+		n, _ := client.NetworkManager("default").Create(ctx, "test")
+		n.Attach(ctx)
+		//a.Remove(ctx)
+		//n.Delete(ctx)
 		return nil
 	},
 }

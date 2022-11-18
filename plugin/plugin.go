@@ -86,6 +86,8 @@ const (
 	NRIApiPlugin Type = "io.containerd.nri.v1"
 	// TransferPlugin implements a transfer service
 	TransferPlugin Type = "io.containerd.transfer.v1"
+	// NetworkPlugin implements a networking
+	NetworkPlugin Type = "io.containerd.network.v1"
 )
 
 const (
