@@ -30,6 +30,7 @@ import (
 	"github.com/containerd/containerd/images"
 	"github.com/containerd/containerd/leases"
 	"github.com/containerd/containerd/namespaces"
+	"github.com/containerd/containerd/pkg/transfer"
 	"github.com/containerd/containerd/plugin"
 	"github.com/containerd/containerd/sandbox"
 	srv "github.com/containerd/containerd/services"
@@ -50,6 +51,7 @@ type services struct {
 	introspectionService introspection.Service
 	sandboxStore         sandbox.Store
 	sandboxController    sandbox.Controller
+	transferService      transfer.Transferrer
 }
 
 // ServicesOpt allows callers to set options on the services
@@ -177,6 +179,13 @@ func WithSandboxController(client sandbox.Controller) ServicesOpt {
 	}
 }
 
+// WithTransferService sets the transfer service.
+func WithTransferService(tr transfer.Transferrer) ServicesOpt {
+	return func(s *services) {
+		s.transferService = tr
+	}
+}
+
 // WithInMemoryServices is suitable for cases when there is need to use containerd's client from
 // another (in-memory) containerd plugin (such as CRI).
 func WithInMemoryServices(ic *plugin.InitContext) ClientOpt {
@@ -194,6 +203,9 @@ func WithInMemoryServices(ic *plugin.InitContext) ClientOpt {
 			},
 			plugin.SandboxControllerPlugin: func(i interface{}) ServicesOpt {
 				return WithSandboxController(i.(sandbox.Controller))
+			},
+			plugin.TransferPlugin: func(i interface{}) ServicesOpt {
+				return WithTransferService(i.(transfer.Transferrer))
 			},
 		} {
 			i, err := ic.Get(t)

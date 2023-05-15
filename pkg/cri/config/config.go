@@ -320,6 +320,10 @@ type PluginConfig struct {
 	// The string is in the golang duration format, see:
 	//   https://golang.org/pkg/time/#ParseDuration
 	ImagePullProgressTimeout string `toml:"image_pull_progress_timeout" json:"imagePullProgressTimeout"`
+	// DisableImagePullWithTransferService disables image pull using transfer service, i.e. use client.Pull to pull images
+	// By default it is set to false, i.e. use transfer service to pull image
+	// When transfer service is used to pull images, pull releted configs, like max_concurrent_downloads and unpack_config are configured under [plugins."io.containerd.transfer.v1.local"]
+	DisableImagePullWithTransferService bool `toml:"disable_image_pull_with_transfer_service" json:"disableImagePullWithTransferService"`
 	// DrainExecSyncIOTimeout is the maximum duration to wait for ExecSync
 	// API' IO EOF event after exec init process exits. A zero value means
 	// there is no timeout.

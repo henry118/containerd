@@ -84,7 +84,8 @@ func DefaultConfig() PluginConfig {
 		ImageDecryption: ImageDecryption{
 			KeyModel: KeyModelNode,
 		},
-		ImagePullProgressTimeout: time.Minute.String(),
-		DrainExecSyncIOTimeout:   "0s",
+		ImagePullProgressTimeout:            time.Minute.String(),
+		DisableImagePullWithTransferService: false,
+		DrainExecSyncIOTimeout:              "0s",
 	}
 }

@@ -44,6 +44,9 @@ import (
 	criconfig "github.com/containerd/containerd/pkg/cri/config"
 	crilabels "github.com/containerd/containerd/pkg/cri/labels"
 	snpkg "github.com/containerd/containerd/pkg/snapshotters"
+	transferimage "github.com/containerd/containerd/pkg/transfer/image"
+	"github.com/containerd/containerd/pkg/transfer/registry"
+	"github.com/containerd/containerd/platforms"
 	"github.com/containerd/containerd/remotes/docker"
 	"github.com/containerd/containerd/remotes/docker/config"
 	"github.com/containerd/containerd/tracing"
@@ -114,6 +117,7 @@ func (c *criService) PullImage(ctx context.Context, r *runtime.PullImageRequest)
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse image reference %q: %w", imageRef, err)
 	}
+
 	ref := namedRef.String()
 	if ref != imageRef {
 		log.G(ctx).Debugf("PullImage using normalized image ref: %q", ref)
@@ -133,6 +137,7 @@ func (c *criService) PullImage(ctx context.Context, r *runtime.PullImageRequest)
 			Headers: c.config.Registry.Headers,
 			Hosts:   c.registryHosts(ctx, r.GetAuth(), pullReporter.optionUpdateClient),
 		})
+		image        containerd.Image
 		isSchema1    bool
 		imageHandler containerdimages.HandlerFunc = func(_ context.Context,
 			desc imagespec.Descriptor) ([]imagespec.Descriptor, error) {
@@ -144,50 +149,79 @@ func (c *criService) PullImage(ctx context.Context, r *runtime.PullImageRequest)
 	)
 
 	defer pcancel()
+
 	snapshotter, err := c.snapshotterFromPodSandboxConfig(ctx, ref, r.SandboxConfig)
 	if err != nil {
 		return nil, err
 	}
-	log.G(ctx).Debugf("PullImage %q with snapshotter %s", ref, snapshotter)
+
 	span.SetAttributes(
 		tracing.Attribute("image.ref", ref),
 		tracing.Attribute("snapshotter.name", snapshotter),
 	)
-
 	labels := c.getLabels(ctx, ref)
 
-	pullOpts := []containerd.RemoteOpt{
-		containerd.WithSchema1Conversion, //nolint:staticcheck // Ignore SA1019. Need to keep deprecated package for compatibility.
-		containerd.WithResolver(resolver),
-		containerd.WithPullSnapshotter(snapshotter),
-		containerd.WithPullUnpack,
-		containerd.WithPullLabels(labels),
-		containerd.WithMaxConcurrentDownloads(c.config.MaxConcurrentDownloads),
-		containerd.WithImageHandler(imageHandler),
-		containerd.WithUnpackOpts([]containerd.UnpackOpt{
-			containerd.WithUnpackDuplicationSuppressor(c.unpackDuplicationSuppressor),
-		}),
-	}
+	// Pull image using transfer service
+	if !c.config.PluginConfig.DisableImagePullWithTransferService {
+		log.G(ctx).Debugf("PullImage %q with snapshotter %s using transfer service", ref, snapshotter)
+		var sopts []transferimage.StoreOpt
 
-	pullOpts = append(pullOpts, c.encryptedImagesPullOpts()...)
-	if !c.config.ContainerdConfig.DisableSnapshotAnnotations {
-		pullOpts = append(pullOpts,
-			containerd.WithImageHandlerWrapper(snpkg.AppendInfoHandlerWrapper(ref)))
-	}
+		sopts = append(sopts, transferimage.WithPlatforms(platforms.DefaultSpec()))
+		sopts = append(sopts, transferimage.WithUnpack(platforms.DefaultSpec(), snapshotter))
+		sopts = append(sopts, transferimage.WithImageLabels(labels))
 
-	if c.config.ContainerdConfig.DiscardUnpackedLayers {
-		// Allows GC to clean layers up from the content store after unpacking
-		pullOpts = append(pullOpts,
-			containerd.WithChildLabelMap(containerdimages.ChildGCLabelsFilterLayers))
-	}
+		ch, _ := newcriCredentials(ctx, ref, r.GetAuth())
+		reg := registry.NewOCIRegistry(ref, nil, ch)
+		is := transferimage.NewStore(ref, sopts...)
 
-	pullReporter.start(pctx)
-	image, err := c.client.Pull(pctx, ref, pullOpts...)
-	pcancel()
-	if err != nil {
-		return nil, fmt.Errorf("failed to pull and unpack image %q: %w", ref, err)
+		// pf, done := ProgressHandler(ctx, os.Stdout)
+		// defer done()
+		// Todo handle progress
+		err = c.client.TransferService().Transfer(ctx, reg, is)
+		if err != nil {
+			return nil, fmt.Errorf("failed to pull and unpack image %q: %w", ref, err)
+		}
+
+		// Image should be pulled, unpacked and present in containerd image store at this moment
+		image, err = c.client.GetImage(ctx, ref)
+		if err != nil {
+			return nil, fmt.Errorf("failed to get image %q from containerd image store: %w", ref, err)
+		}
+	} else { // pull image with client.Pull()
+		log.G(ctx).Debugf("PullImage %q with snapshotter %s using client.Pull()", ref, snapshotter)
+		pullOpts := []containerd.RemoteOpt{
+			containerd.WithSchema1Conversion, //nolint:staticcheck // Ignore SA1019. Need to keep deprecated package for compatibility.
+			containerd.WithResolver(resolver),
+			containerd.WithPullSnapshotter(snapshotter),
+			containerd.WithPullUnpack,
+			containerd.WithPullLabels(labels),
+			containerd.WithMaxConcurrentDownloads(c.config.MaxConcurrentDownloads),
+			containerd.WithImageHandler(imageHandler),
+			containerd.WithUnpackOpts([]containerd.UnpackOpt{
+				containerd.WithUnpackDuplicationSuppressor(c.unpackDuplicationSuppressor),
+			}),
+		}
+
+		pullOpts = append(pullOpts, c.encryptedImagesPullOpts()...)
+		if !c.config.ContainerdConfig.DisableSnapshotAnnotations {
+			pullOpts = append(pullOpts,
+				containerd.WithImageHandlerWrapper(snpkg.AppendInfoHandlerWrapper(ref)))
+		}
+
+		if c.config.ContainerdConfig.DiscardUnpackedLayers {
+			// Allows GC to clean layers up from the content store after unpacking
+			pullOpts = append(pullOpts,
+				containerd.WithChildLabelMap(containerdimages.ChildGCLabelsFilterLayers))
+		}
+
+		pullReporter.start(pctx)
+		image, err = c.client.Pull(pctx, ref, pullOpts...)
+		pcancel()
+		if err != nil {
+			return nil, fmt.Errorf("failed to pull and unpack image %q: %w", ref, err)
+		}
+		span.AddEvent("Pull and unpack image complete")
 	}
-	span.AddEvent("Pull and unpack image complete")
 
 	configDesc, err := image.Config(ctx)
 	if err != nil {
@@ -735,4 +769,31 @@ func (c *criService) snapshotterFromPodSandboxConfig(ctx context.Context, imageR
 	snapshotter = c.runtimeSnapshotter(context.Background(), ociRuntime)
 	log.G(ctx).Infof("experimental: PullImage %q for runtime %s, using snapshotter %s", imageRef, runtimeHandler, snapshotter)
 	return snapshotter, nil
+}
+
+func newcriCredentials(ctx context.Context, ref string, auth *runtime.AuthConfig) (registry.CredentialHelper, error) {
+	return &criCredentials{
+		ref:        ref,
+		authConfig: auth,
+	}, nil
+}
+
+type criCredentials struct {
+	ref        string
+	authConfig *runtime.AuthConfig
+}
+
+// GetCredentials gets credential from criCredentials makes criCredentials a registry.CredentialHelper
+func (cc *criCredentials) GetCredentials(ctx context.Context, ref string, host string) (registry.Credentials, error) {
+	if ref == cc.ref {
+		username, secret, err := ParseAuth(cc.authConfig, host)
+		if err != nil {
+			return registry.Credentials{
+				Host:     host,
+				Username: username,
+				Secret:   secret,
+			}, nil
+		}
+	}
+	return registry.Credentials{}, nil
 }

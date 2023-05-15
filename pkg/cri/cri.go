@@ -48,6 +48,7 @@ func init() {
 			plugin.EventPlugin,
 			plugin.ServicePlugin,
 			plugin.NRIApiPlugin,
+			plugin.TransferPlugin,
 		},
 		InitFn: initCRIService,
 	})
