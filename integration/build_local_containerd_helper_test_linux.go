@@ -18,6 +18,7 @@ package integration
 
 import (
 	// Register for linux platforms
+	_ "github.com/containerd/containerd/plugins/imageverifier"
 	_ "github.com/containerd/containerd/plugins/sandbox"   // WithInMemoryServices will fail otherwise
 	_ "github.com/containerd/containerd/plugins/streaming" // WithInMemoryServices will fail otherwise
 	_ "github.com/containerd/containerd/plugins/transfer"  // WithInMemoryServices will fail otherwise

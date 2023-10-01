@@ -75,6 +75,17 @@ func NewOCIRegistry(ref string, headers http.Header, creds CredentialHelper) *OC
 	}
 }
 
+// NewOCIRegistry initializes with hosts, authorizer callback, and headers
+func NewOCIRegistry2(ref string, headers http.Header, resolver remotes.Resolver, creds CredentialHelper) *OCIRegistry {
+	// Create an authorizer
+	return &OCIRegistry{
+		reference: ref,
+		headers:   headers,
+		creds:     creds,
+		resolver:  resolver,
+	}
+}
+
 // From stream
 type CredentialHelper interface {
 	GetCredentials(ctx context.Context, ref, host string) (Credentials, error)

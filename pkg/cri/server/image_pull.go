@@ -171,13 +171,15 @@ func (c *criService) PullImage(ctx context.Context, r *runtime.PullImageRequest)
 		sopts = append(sopts, transferimage.WithImageLabels(labels))
 
 		ch, _ := newcriCredentials(ctx, ref, r.GetAuth())
-		reg := registry.NewOCIRegistry(ref, nil, ch)
+		reg := registry.NewOCIRegistry2(ref, c.config.Registry.Headers, resolver, ch)
 		is := transferimage.NewStore(ref, sopts...)
 
 		// pf, done := ProgressHandler(ctx, os.Stdout)
 		// defer done()
 		// Todo handle progress
-		err = c.client.TransferService().Transfer(ctx, reg, is)
+		pullReporter.start(pctx)
+		err = c.client.TransferService().Transfer(pctx, reg, is)
+		pcancel()
 		if err != nil {
 			return nil, fmt.Errorf("failed to pull and unpack image %q: %w", ref, err)
 		}
