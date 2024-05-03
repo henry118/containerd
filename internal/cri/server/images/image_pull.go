@@ -33,6 +33,7 @@ import (
 	"time"
 
 	"github.com/containerd/log"
+	"github.com/containerd/platforms"
 	distribution "github.com/distribution/reference"
 	imagedigest "github.com/opencontainers/go-digest"
 	imagespec "github.com/opencontainers/image-spec/specs-go/v1"
@@ -43,6 +44,8 @@ import (
 	containerdimages "github.com/containerd/containerd/v2/core/images"
 	"github.com/containerd/containerd/v2/core/remotes/docker"
 	"github.com/containerd/containerd/v2/core/remotes/docker/config"
+	timage "github.com/containerd/containerd/v2/core/transfer/image"
+	"github.com/containerd/containerd/v2/core/transfer/registry"
 	"github.com/containerd/containerd/v2/internal/cri/annotations"
 	criconfig "github.com/containerd/containerd/v2/internal/cri/config"
 	crilabels "github.com/containerd/containerd/v2/internal/cri/labels"
@@ -205,13 +208,44 @@ func (c *CRIImageService) PullImage(ctx context.Context, name string, credential
 	}
 
 	pullReporter.start(pctx)
-	image, err := c.client.Pull(pctx, ref, pullOpts...)
+	//image, err := c.client.Pull(pctx, ref, pullOpts...)
+	// resolver := docker.NewResolver(docker.ResolverOptions{
+	// 	Hosts:   config.ConfigureHosts(ctx, hostOptions),
+	// 	Headers: ropts.headers,
+	// })
+
+	var ropts []registry.Opt
+	ropts = append(ropts, registry.WithHeaders(c.config.Registry.Headers))
+	ropts = append(ropts, registry.WithCredentials(nil))
+	ropts = append(ropts, registry.WithHostDir(c.config.Registry.ConfigPath))
+	//TODO optionUpdateClient
+	reg, err := registry.NewOCIRegistry(pctx, ref, ropts...)
+	if err != nil {
+		return "", err
+	}
+
+	var sopts []timage.StoreOpt
+	sopts = append(sopts, timage.WithUnpack(platforms.DefaultSpec(), snapshotter))
+	sopts = append(sopts, timage.WithImageLabels(labels))
+	// WithImageHandler - no longer needed
+	// WithUnpackDuplicationSuppressor -- to tr config
+	// WithUnpackApplyOpts -- to tr config
+	// AppendInfoHandlerWrapper -- to tr config
+	// WithChildLabelMap -- to tr config
+
+	is := timage.NewStore(ref, sopts...)
+
+	err = c.client.Transfer(pctx, reg, is)
 	pcancel()
 	if err != nil {
 		return "", fmt.Errorf("failed to pull and unpack image %q: %w", ref, err)
 	}
 	span.AddEvent("Pull and unpack image complete")
 
+	image, err := c.client.GetImage(ctx, ref)
+	if err != nil {
+		return "", err
+	}
 	configDesc, err := image.Config(ctx)
 	if err != nil {
 		return "", fmt.Errorf("get image config descriptor: %w", err)

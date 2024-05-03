@@ -24,6 +24,7 @@ import (
 	"github.com/containerd/containerd/v2/core/content"
 	"github.com/containerd/containerd/v2/core/images"
 	"github.com/containerd/containerd/v2/core/snapshots"
+	"github.com/containerd/containerd/v2/core/transfer"
 	criconfig "github.com/containerd/containerd/v2/internal/cri/config"
 	imagestore "github.com/containerd/containerd/v2/internal/cri/store/image"
 	snapshotstore "github.com/containerd/containerd/v2/internal/cri/store/snapshot"
@@ -40,6 +41,7 @@ type imageClient interface {
 	ListImages(context.Context, ...string) ([]containerd.Image, error)
 	GetImage(context.Context, string) (containerd.Image, error)
 	Pull(context.Context, string, ...containerd.RemoteOpt) (containerd.Image, error)
+	Transfer(ctx context.Context, src interface{}, dest interface{}, opts ...transfer.Opt) error
 }
 
 type ImagePlatform struct {
