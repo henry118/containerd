@@ -34,9 +34,11 @@ import (
 	"github.com/containerd/containerd/v2/contrib/seccomp"
 	"github.com/containerd/containerd/v2/core/containers"
 	"github.com/containerd/containerd/v2/core/snapshots"
+	"github.com/containerd/containerd/v2/pkg/idtools"
 	"github.com/containerd/containerd/v2/pkg/oci"
 	"github.com/containerd/log"
 	"github.com/containerd/platforms"
+
 	"github.com/intel/goresctrl/pkg/blockio"
 	"github.com/opencontainers/runtime-spec/specs-go"
 	"github.com/urfave/cli/v2"
@@ -46,12 +48,8 @@ import (
 
 var platformRunFlags = []cli.Flag{
 	&cli.StringFlag{
-		Name:  "uidmap",
-		Usage: "Run inside a user namespace with the specified UID mapping range; specified with the format `container-uid:host-uid:length`",
-	},
-	&cli.StringFlag{
-		Name:  "gidmap",
-		Usage: "Run inside a user namespace with the specified GID mapping range; specified with the format `container-gid:host-gid:length`",
+		Name:  "userns-remap",
+		Usage: "Run inside a user namespace with the specified user",
 	},
 	&cli.BoolFlag{
 		Name:  "remap-labels",
@@ -159,26 +157,33 @@ func NewContainer(ctx gocontext.Context, client *containerd.Client, context *cli
 				containerd.WithImageConfigLabels(image),
 				containerd.WithAdditionalContainerLabels(labels),
 				containerd.WithSnapshotter(snapshotter))
-			if uidmap, gidmap := context.String("uidmap"), context.String("gidmap"); uidmap != "" && gidmap != "" {
-				uidMap, err := parseIDMapping(uidmap)
+
+			userns := context.String("userns-remap")
+			if userns != "" {
+				idmap, err := idtools.LoadIdentityMapping(userns)
 				if err != nil {
 					return nil, err
 				}
-				gidMap, err := parseIDMapping(gidmap)
-				if err != nil {
-					return nil, err
-				}
-				opts = append(opts,
-					oci.WithUserNamespace([]specs.LinuxIDMapping{uidMap}, []specs.LinuxIDMapping{gidMap}))
+				uidSpecs, gidSpecs := idmap.ToSpec()
+				opts = append(opts, oci.WithUserNamespace(uidSpecs, gidSpecs))
 				// use snapshotter opts or the remapped snapshot support to shift the filesystem
 				// currently the snapshotters known to support the labels are:
 				// fuse-overlayfs - https://github.com/containerd/fuse-overlayfs-snapshotter
 				// overlay - in case of idmapped mount points are supported by host kernel (Linux kernel 5.19)
 				if context.Bool("remap-labels") {
+					rp := idmap.RootPair()
+					size := func() int {
+						for _, m := range idmap.UIDMaps {
+							if m.ContainerID == 0 {
+								return m.Size
+							}
+						}
+						return 0
+					}()
 					cOpts = append(cOpts, containerd.WithNewSnapshot(id, image,
-						containerd.WithRemapperLabels(0, uidMap.HostID, 0, gidMap.HostID, uidMap.Size)))
+						containerd.WithRemapperLabels(0, uint32(rp.UID), 0, uint32(rp.GID), uint32(size))))
 				} else {
-					cOpts = append(cOpts, containerd.WithRemappedSnapshot(id, image, uidMap.HostID, gidMap.HostID))
+					cOpts = append(cOpts, containerd.WithRemappedSnapshot(id, image, idmap))
 				}
 			} else {
 				// Even when "read-only" is set, we don't use KindView snapshot here. (#1495)
@@ -415,6 +420,7 @@ func NewContainer(ctx gocontext.Context, client *containerd.Client, context *cli
 	return client.NewContainer(ctx, id, cOpts...)
 }
 
+//lint:ignore U1000 Ignore unused function
 func parseIDMapping(mapping string) (specs.LinuxIDMapping, error) {
 	// We expect 3 parts, but limit to 4 to allow detection of invalid values.
 	parts := strings.SplitN(mapping, ":", 4)

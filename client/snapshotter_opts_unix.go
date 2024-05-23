@@ -23,6 +23,7 @@ import (
 	"fmt"
 
 	"github.com/containerd/containerd/v2/core/snapshots"
+	"github.com/containerd/containerd/v2/pkg/idtools"
 )
 
 const (
@@ -110,7 +111,11 @@ func resolveSnapshotOptions(ctx context.Context, client *Client, snapshotterName
 		return "", err
 	}
 	// TODO(dgl): length isn't taken into account here yet either.
-	if err := remapRootFS(ctx, mounts, hostUID, hostGID); err != nil {
+	idmap := idtools.IdentityMapping{
+		UIDMaps: []idtools.IDMap{{ContainerID: int(ctrUID), HostID: int(hostUID), Size: int(length)}},
+		GIDMaps: []idtools.IDMap{{ContainerID: int(ctrGID), HostID: int(hostGID), Size: int(lengthGID)}},
+	}
+	if err := remapRootFS(ctx, mounts, idmap); err != nil {
 		snapshotter.Remove(ctx, usernsID+"-remap")
 		return "", err
 	}
