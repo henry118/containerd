@@ -36,6 +36,7 @@ import (
 	"github.com/containerd/containerd/api/types/runc/options"
 	. "github.com/containerd/containerd/v2/client"
 	"github.com/containerd/containerd/v2/core/containers"
+	"github.com/containerd/containerd/v2/integration/images"
 	"github.com/containerd/containerd/v2/pkg/cio"
 	"github.com/containerd/containerd/v2/pkg/oci"
 	"github.com/containerd/containerd/v2/pkg/shim"
@@ -48,7 +49,8 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-const testUserNSImage = "ghcr.io/containerd/alpine:3.14.0"
+// We use this image for user ns tests because it has files with setuid bits
+var testUserNSImage = images.Get(images.VolumeOwnership)
 
 func TestTaskUpdate(t *testing.T) {
 	t.Parallel()
@@ -1091,9 +1093,59 @@ func TestContainerKillInitPidHost(t *testing.T) {
 }
 
 func TestUserNamespaces(t *testing.T) {
-	t.Run("WritableRootFS", func(t *testing.T) { testUserNamespaces(t, false) })
-	// see #1373 and runc#1572
-	t.Run("ReadonlyRootFS", func(t *testing.T) { testUserNamespaces(t, true) })
+	for name, test := range map[string]struct {
+		testCmd oci.SpecOpts
+		roRootFS bool
+		exitCode int
+		uidmaps []specs.LinuxIDMapping
+		gidmaps []specs.LinuxIDMapping	
+	}{
+		"WritableRootFS": {
+			testCmd: withExitStatus(7),
+			roRootFS: false,
+			exitCode: 7,
+			uidmaps: []specs.LinuxIDMapping{{ContainerID: 0, HostID: 1000, Size: 65535}},
+			gidmaps: []specs.LinuxIDMapping{{ContainerID: 0, HostID: 2000, Size: 65535}},
+		},
+		// see #1373 and runc#1572
+		"ReadonlyRootFS": {
+			testCmd: withExitStatus(7),
+			roRootFS: true,
+			exitCode: 7,
+			uidmaps: []specs.LinuxIDMapping{{ContainerID: 0, HostID: 1000, Size: 65535}},
+			gidmaps: []specs.LinuxIDMapping{{ContainerID: 0, HostID: 2000, Size: 65535}},
+		},
+		"CheckSetUidBit": {
+			testCmd: withProcessArgs("bash", "-c", "[ -u /usr/bin/passwd ] && exit 7"),
+			roRootFS: false,
+			exitCode: 7,
+			uidmaps: []specs.LinuxIDMapping{{ContainerID: 0, HostID: 1000, Size: 65535}},
+			gidmaps: []specs.LinuxIDMapping{{ContainerID: 0, HostID: 2000, Size: 65535}},
+		},
+		"WritableRootFSMultipleMap": {
+			testCmd: withExitStatus(7),
+			roRootFS: false,
+			exitCode: 7,
+			uidmaps: []specs.LinuxIDMapping{{ContainerID: 0, HostID: 0, Size: 10}, {ContainerID: 10, HostID: 1000, Size: 65535}},
+			gidmaps: []specs.LinuxIDMapping{{ContainerID: 0, HostID: 0, Size: 20}, {ContainerID: 20, HostID: 2000, Size: 65535}},
+		},
+		"ReadonlyRootFSMultipleMap": {
+			testCmd: withExitStatus(7),
+			roRootFS: true,
+			exitCode: 7,
+			uidmaps: []specs.LinuxIDMapping{{ContainerID: 0, HostID: 0, Size: 20}, {ContainerID: 20, HostID: 2000, Size: 65535}},
+			gidmaps: []specs.LinuxIDMapping{{ContainerID: 0, HostID: 0, Size: 20}, {ContainerID: 20, HostID: 2000, Size: 65535}},
+		},
+		"CheckSetUidBitMultipleMap": {
+			testCmd: withProcessArgs("bash", "-c", "[ -u /usr/bin/passwd ] && exit 7"),
+			roRootFS: false,
+			exitCode: 7,
+			uidmaps: []specs.LinuxIDMapping{{ContainerID: 0, HostID: 0, Size: 20}, {ContainerID: 20, HostID: 2000, Size: 65535}},
+			gidmaps: []specs.LinuxIDMapping{{ContainerID: 0, HostID: 0, Size: 20}, {ContainerID: 20, HostID: 2000, Size: 65535}},
+		},
+	}{
+		t.Run(name, func(t *testing.T) { testUserNamespaces(t, test.uidmaps, test.gidmaps, test.testCmd, test.roRootFS) })
+	}
 }
 
 func checkUserNS(t *testing.T) {
@@ -1107,7 +1159,7 @@ func checkUserNS(t *testing.T) {
 	}
 }
 
-func testUserNamespaces(t *testing.T, readonlyRootFS bool) {
+func testUserNamespaces(t *testing.T, uidmaps, gidmaps []specs.LinuxIDMapping, cmdOpt oci.SpecOpts, readonlyRootFS bool) {
 	checkUserNS(t)
 
 	client, err := newClient(t, address)
@@ -1129,25 +1181,23 @@ func testUserNamespaces(t *testing.T, readonlyRootFS bool) {
 	}
 
 	opts := []NewContainerOpts{WithNewSpec(oci.WithImageConfig(image),
-		withExitStatus(7),
-		oci.WithUserNamespace([]specs.LinuxIDMapping{
-			{
-				ContainerID: 0,
-				HostID:      1000,
-				Size:        10000,
-			},
-		}, []specs.LinuxIDMapping{
-			{
-				ContainerID: 0,
-				HostID:      2000,
-				Size:        10000,
-			},
-		}),
+		cmdOpt,
+		oci.WithUserID(34), // run task as the "backup" user
+		oci.WithUserNamespace(uidmaps, gidmaps),
 	)}
+
 	if readonlyRootFS {
-		opts = append([]NewContainerOpts{WithRemappedSnapshotView(id, image, 1000, 2000)}, opts...)
+		if len(uidmaps) > 1 {
+			opts = append([]NewContainerOpts{WithUserNSRemappedSnapshotView(id, image, uidmaps, gidmaps)}, opts...)
+		} else {
+			opts = append([]NewContainerOpts{WithRemappedSnapshotView(id, image, 1000, 2000)}, opts...)
+		}
 	} else {
-		opts = append([]NewContainerOpts{WithRemappedSnapshot(id, image, 1000, 2000)}, opts...)
+		if len(uidmaps) > 1 {
+			opts = append([]NewContainerOpts{WithUserNSRemappedSnapshot(id, image, uidmaps, gidmaps)}, opts...)
+		} else {
+			opts = append([]NewContainerOpts{WithRemappedSnapshot(id, image, 1000, 2000)}, opts...)
+		}
 	}
 
 	container, err := client.NewContainer(ctx, id, opts...)
