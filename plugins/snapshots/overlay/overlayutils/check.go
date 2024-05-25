@@ -255,7 +255,7 @@ func SupportsIDMappedMounts() (bool, error) {
 	uidmap := fmt.Sprintf("%d:%d:%d", uidMap.ContainerID, uidMap.HostID, uidMap.Size)
 	gidmap := fmt.Sprintf("%d:%d:%d", gidMap.ContainerID, gidMap.HostID, gidMap.Size)
 
-	usernsFd, err := mount.GetUsernsFD(uidmap, gidmap)
+	usernsFd, err := mount.GetUsernsFD([]string{uidmap}, []string{gidmap})
 	if err != nil {
 		return false, err
 	}

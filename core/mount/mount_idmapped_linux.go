@@ -30,39 +30,49 @@ import (
 	"github.com/containerd/containerd/v2/pkg/sys"
 )
 
-// TODO: Support multiple mappings in future
-func parseIDMapping(mapping string) ([]syscall.SysProcIDMap, error) {
-	parts := strings.Split(mapping, ":")
-	if len(parts) != 3 {
-		return nil, fmt.Errorf("user namespace mappings require the format `container-id:host-id:size`")
-	}
+func parseIDMapping(mappings []string) ([]syscall.SysProcIDMap, error) {
+	parse := func(mapping string) (syscall.SysProcIDMap, error) {
+		parts := strings.Split(mapping, ":")
+		if len(parts) != 3 {
+			return syscall.SysProcIDMap{}, fmt.Errorf("user namespace mappings require the format `container-id:host-id:size`")
+		}
 
-	cID, err := strconv.Atoi(parts[0])
-	if err != nil {
-		return nil, fmt.Errorf("invalid container id for user namespace remapping, %w", err)
-	}
+		cID, err := strconv.Atoi(parts[0])
+		if err != nil {
+			return syscall.SysProcIDMap{}, fmt.Errorf("invalid container id for user namespace remapping, %w", err)
+		}
 
-	hID, err := strconv.Atoi(parts[1])
-	if err != nil {
-		return nil, fmt.Errorf("invalid host id for user namespace remapping, %w", err)
-	}
+		hID, err := strconv.Atoi(parts[1])
+		if err != nil {
+			return syscall.SysProcIDMap{}, fmt.Errorf("invalid host id for user namespace remapping, %w", err)
+		}
 
-	size, err := strconv.Atoi(parts[2])
-	if err != nil {
-		return nil, fmt.Errorf("invalid size for user namespace remapping, %w", err)
-	}
+		size, err := strconv.Atoi(parts[2])
+		if err != nil {
+			return syscall.SysProcIDMap{}, fmt.Errorf("invalid size for user namespace remapping, %w", err)
+		}
 
-	if cID < 0 || hID < 0 || size < 0 {
-		return nil, fmt.Errorf("invalid mapping %s, all IDs and size must be positive integers", mapping)
-	}
+		if cID < 0 || hID < 0 || size < 0 {
+			return syscall.SysProcIDMap{}, fmt.Errorf("invalid mapping %s, all IDs and size must be positive integers", mapping)
+		}
 
-	return []syscall.SysProcIDMap{
-		{
+		return syscall.SysProcIDMap{
 			ContainerID: cID,
 			HostID:      hID,
 			Size:        size,
-		},
-	}, nil
+		}, nil
+	}
+
+	var retval []syscall.SysProcIDMap
+	for _, mapping := range mappings {
+		r, err := parse(mapping)
+		if err != nil {
+			return nil, err
+		}
+		retval = append(retval, r)
+	}
+
+	return retval, nil
 }
 
 // IDMapMount applies GID/UID shift according to gidmap/uidmap for target path
@@ -94,7 +104,7 @@ func IDMapMount(source, target string, usernsFd int) (err error) {
 
 // GetUsernsFD forks the current process and creates a user namespace using
 // the specified mappings.
-func GetUsernsFD(uidmap, gidmap string) (_usernsFD *os.File, _ error) {
+func GetUsernsFD(uidmap, gidmap []string) (_usernsFD *os.File, _ error) {
 	uidMaps, err := parseIDMapping(uidmap)
 	if err != nil {
 		return nil, err

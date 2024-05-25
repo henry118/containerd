@@ -31,9 +31,9 @@ import (
 	"github.com/containerd/containerd/v2/core/snapshots"
 	"github.com/containerd/containerd/v2/core/snapshots/storage"
 	"github.com/containerd/containerd/v2/core/snapshots/testsuite"
+	"github.com/containerd/containerd/v2/pkg/idtools"
 	"github.com/containerd/containerd/v2/pkg/testutil"
 	"github.com/containerd/containerd/v2/plugins/snapshots/overlay/overlayutils"
-	"github.com/opencontainers/runtime-spec/specs-go"
 )
 
 func newSnapshotterWithOpts(opts ...Opt) testsuite.SnapshotterFunc {
@@ -215,25 +215,27 @@ func testOverlayRemappedBind(t *testing.T, newSnapshotter testsuite.SnapshotterF
 		t.Skip("overlayfs doesn't support idmapped mounts")
 	}
 
-	hostID := uint32(666)
-	contID := uint32(0)
-	length := uint32(65536)
+	hostID := 666
+	contID := 0
+	length := 65536
 
-	uidMap := specs.LinuxIDMapping{
+	uidMap := idtools.IDMap{
 		ContainerID: contID,
 		HostID:      hostID,
 		Size:        length,
 	}
-	gidMap := specs.LinuxIDMapping{
+	gidMap := idtools.IDMap{
 		ContainerID: contID,
 		HostID:      hostID,
 		Size:        length,
 	}
-	opts = append(opts, containerd.WithRemapperLabels(
-		uidMap.ContainerID, uidMap.HostID,
-		gidMap.ContainerID, gidMap.HostID,
-		length),
-	)
+
+	idmap := idtools.IdentityMapping{
+		UIDMaps: []idtools.IDMap{uidMap},
+		GIDMaps: []idtools.IDMap{gidMap},
+	}
+
+	opts = append(opts, containerd.WithRemapperLabels(idmap))
 
 	key := "/tmp/test"
 	if mounts, err = o.Prepare(ctx, key, "", opts...); err != nil {
@@ -271,7 +273,7 @@ func testOverlayRemappedBind(t *testing.T, newSnapshotter testsuite.SnapshotterF
 
 		if stat, ok := st.Sys().(*syscall.Stat_t); !ok {
 			t.Errorf("incompatible types after stat call: *syscall.Stat_t expected")
-		} else if stat.Uid != uidMap.HostID || stat.Gid != gidMap.HostID {
+		} else if stat.Uid != uint32(uidMap.HostID) || stat.Gid != uint32(gidMap.HostID) {
 			t.Errorf("bad mapping: expected {uid: %d, gid: %d}; real {uid: %d, gid: %d}", uidMap.HostID, gidMap.HostID, int(stat.Uid), int(stat.Gid))
 		}
 	}
@@ -320,25 +322,26 @@ func testOverlayRemappedActive(t *testing.T, newSnapshotter testsuite.Snapshotte
 		t.Skip("overlayfs doesn't support idmapped mounts")
 	}
 
-	hostID := uint32(666)
-	contID := uint32(0)
-	length := uint32(65536)
+	hostID := 666
+	contID := 0
+	length := 65536
 
-	uidMap := specs.LinuxIDMapping{
+	uidMap := idtools.IDMap{
 		ContainerID: contID,
 		HostID:      hostID,
 		Size:        length,
 	}
-	gidMap := specs.LinuxIDMapping{
+	gidMap := idtools.IDMap{
 		ContainerID: contID,
 		HostID:      hostID,
 		Size:        length,
 	}
-	opts = append(opts, containerd.WithRemapperLabels(
-		uidMap.ContainerID, uidMap.HostID,
-		gidMap.ContainerID, gidMap.HostID,
-		length),
-	)
+
+	idmap := idtools.IdentityMapping{
+		UIDMaps: []idtools.IDMap{uidMap},
+		GIDMaps: []idtools.IDMap{gidMap},
+	}
+	opts = append(opts, containerd.WithRemapperLabels(idmap))
 
 	key := "/tmp/test"
 	if _, err = o.Prepare(ctx, key, "", opts...); err != nil {
@@ -377,7 +380,7 @@ func testOverlayRemappedActive(t *testing.T, newSnapshotter testsuite.Snapshotte
 	}
 	if stat, ok := st.Sys().(*syscall.Stat_t); !ok {
 		t.Errorf("incompatible types after stat call: *syscall.Stat_t expected")
-	} else if stat.Uid != uidMap.HostID || stat.Gid != gidMap.HostID {
+	} else if stat.Uid != uint32(uidMap.HostID) || stat.Gid != uint32(gidMap.HostID) {
 		t.Errorf("bad mapping: expected {uid: %d, gid: %d}; received {uid: %d, gid: %d}", uidMap.HostID, gidMap.HostID, int(stat.Uid), int(stat.Gid))
 	}
 }
@@ -415,13 +418,22 @@ func testOverlayRemappedInvalidMapping(t *testing.T, newSnapshotter testsuite.Sn
 			}),
 		},
 		"WithRemapperLabels: container ID (GID/UID) other than 0 must fail": {
-			containerd.WithRemapperLabels(666, 666, 666, 666, 666),
+			containerd.WithRemapperLabels(idtools.IdentityMapping{
+				UIDMaps: []idtools.IDMap{{ContainerID: 666, HostID: 666, Size: 666}},
+				GIDMaps: []idtools.IDMap{{ContainerID: 666, HostID: 666, Size: 666}},
+			}),
 		},
 		"WithRemapperLabels: container ID (UID) other than 0 must fail": {
-			containerd.WithRemapperLabels(666, 0, 0, 0, 65536),
+			containerd.WithRemapperLabels(idtools.IdentityMapping{
+				UIDMaps: []idtools.IDMap{{ContainerID: 666, HostID: 0, Size: 65536}},
+				GIDMaps: []idtools.IDMap{{ContainerID: 0, HostID: 0, Size: 65536}},
+			}),
 		},
 		"WithRemapperLabels: container ID (GID) other than 0 must fail": {
-			containerd.WithRemapperLabels(0, 0, 666, 0, 4294967295),
+			containerd.WithRemapperLabels(idtools.IdentityMapping{
+				UIDMaps: []idtools.IDMap{{ContainerID: 0, HostID: 0, Size: 4294967295}},
+				GIDMaps: []idtools.IDMap{{ContainerID: 666, HostID: 0, Size: 4294967295}},
+			}),
 		},
 	} {
 		t.Log(desc)

@@ -171,17 +171,7 @@ func NewContainer(ctx gocontext.Context, client *containerd.Client, context *cli
 				// fuse-overlayfs - https://github.com/containerd/fuse-overlayfs-snapshotter
 				// overlay - in case of idmapped mount points are supported by host kernel (Linux kernel 5.19)
 				if context.Bool("remap-labels") {
-					rp := idmap.RootPair()
-					size := func() int {
-						for _, m := range idmap.UIDMaps {
-							if m.ContainerID == 0 {
-								return m.Size
-							}
-						}
-						return 0
-					}()
-					cOpts = append(cOpts, containerd.WithNewSnapshot(id, image,
-						containerd.WithRemapperLabels(0, uint32(rp.UID), 0, uint32(rp.GID), uint32(size))))
+					cOpts = append(cOpts, containerd.WithNewSnapshot(id, image, containerd.WithRemapperLabels(idmap)))
 				} else {
 					cOpts = append(cOpts, containerd.WithRemappedSnapshot(id, image, idmap))
 				}

@@ -37,8 +37,8 @@ type mountOpt struct {
 	flags   int
 	data    []string
 	losetup bool
-	uidmap  string
-	gidmap  string
+	uidmaps []string
+	gidmaps []string
 }
 
 var (
@@ -99,8 +99,8 @@ func (m *Mount) mount(target string) (err error) {
 
 	opt := parseMountOptions(options)
 	// The only remapping of both GID and UID is supported
-	if opt.uidmap != "" && opt.gidmap != "" {
-		if usernsFd, err = GetUsernsFD(opt.uidmap, opt.gidmap); err != nil {
+	if len(opt.uidmaps) > 0 && len(opt.gidmaps) > 0 {
+		if usernsFd, err = GetUsernsFD(opt.uidmaps, opt.gidmaps); err != nil {
 			return err
 		}
 		defer usernsFd.Close()
@@ -133,7 +133,7 @@ func (m *Mount) mount(target string) (err error) {
 		chdir, options = compactLowerdirOption(options)
 		// recalculate opt in case of lowerdirs have been replaced
 		// by idmapped ones OR idmapped mounts' not used/supported.
-		if recalcOpt || (opt.uidmap == "" || opt.gidmap == "") {
+		if recalcOpt || len(opt.uidmaps) == 0 || len(opt.gidmaps) == 0 {
 			opt = parseMountOptions(options)
 		}
 	}
@@ -206,7 +206,7 @@ func (m *Mount) mount(target string) (err error) {
 	}
 
 	// remap non-overlay mount point
-	if opt.uidmap != "" && opt.gidmap != "" && m.Type != "overlay" {
+	if len(opt.uidmaps) > 0 && len(opt.gidmaps) > 0 && m.Type != "overlay" {
 		if err := IDMapMount(target, target, int(usernsFd.Fd())); err != nil {
 			return err
 		}
@@ -407,9 +407,9 @@ func parseMountOptions(options []string) (opt mountOpt) {
 		} else if o == loopOpt {
 			opt.losetup = true
 		} else if strings.HasPrefix(o, "uidmap=") {
-			opt.uidmap = strings.TrimPrefix(o, "uidmap=")
+			opt.uidmaps = append(opt.uidmaps, strings.TrimPrefix(o, "uidmap="))
 		} else if strings.HasPrefix(o, "gidmap=") {
-			opt.gidmap = strings.TrimPrefix(o, "gidmap=")
+			opt.gidmaps = append(opt.gidmaps, strings.TrimPrefix(o, "gidmap="))
 		} else {
 			opt.data = append(opt.data, o)
 		}

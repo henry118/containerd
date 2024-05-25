@@ -89,7 +89,7 @@ func testGetUsernsFDBasic(t *testing.T) {
 		},
 	} {
 		t.Run(fmt.Sprintf("#%v", idx), func(t *testing.T) {
-			_, err := GetUsernsFD(tc.uidMaps, tc.gidMaps)
+			_, err := GetUsernsFD([]string{tc.uidMaps}, []string{tc.gidMaps})
 			if tc.hasErr {
 				require.Error(t, err)
 			} else {

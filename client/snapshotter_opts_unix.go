@@ -20,6 +20,7 @@ package client
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 
 	"github.com/containerd/containerd/v2/core/snapshots"
@@ -34,10 +35,16 @@ const (
 // WithRemapperLabels creates the labels used by any supporting snapshotter
 // to shift the filesystem ownership (user namespace mapping) automatically; currently
 // supported by the fuse-overlayfs and overlay snapshotters
-func WithRemapperLabels(ctrUID, hostUID, ctrGID, hostGID, length uint32) snapshots.Opt {
-	return snapshots.WithLabels(map[string]string{
-		snapshots.LabelSnapshotUIDMapping: fmt.Sprintf("%d:%d:%d", ctrUID, hostUID, length),
-		snapshots.LabelSnapshotGIDMapping: fmt.Sprintf("%d:%d:%d", ctrGID, hostGID, length)})
+func WithRemapperLabels(idmap idtools.IdentityMapping) snapshots.Opt {
+	// return snapshots.WithLabels(map[string]string{
+	// 	snapshots.LabelSnapshotUIDMapping: fmt.Sprintf("%d:%d:%d", ctrUID, hostUID, length),
+	// 	snapshots.LabelSnapshotGIDMapping: fmt.Sprintf("%d:%d:%d", ctrGID, hostGID, length)})
+	if val, err := json.Marshal(idmap); err == nil {
+		return snapshots.WithLabels(map[string]string{
+			snapshots.LabelSnapshotUserNSMapping: string(val),
+		})
+	}
+	return snapshots.WithLabels(map[string]string{})
 }
 
 func resolveSnapshotOptions(ctx context.Context, client *Client, snapshotterName string, snapshotter snapshots.Snapshotter, parent string, opts ...snapshots.Opt) (string, error) {
@@ -58,16 +65,13 @@ func resolveSnapshotOptions(ctx context.Context, client *Client, snapshotterName
 		opt(&local)
 	}
 
+	var idmap idtools.IdentityMapping
 	needsRemap := false
-	var uidMap, gidMap string
-
-	if value, ok := local.Labels[snapshots.LabelSnapshotUIDMapping]; ok {
+	if value, ok := local.Labels[snapshots.LabelSnapshotUserNSMapping]; ok {
 		needsRemap = true
-		uidMap = value
-	}
-	if value, ok := local.Labels[snapshots.LabelSnapshotGIDMapping]; ok {
-		needsRemap = true
-		gidMap = value
+		if err = json.Unmarshal([]byte(value), &idmap); err != nil {
+			return "", err
+		}
 	}
 
 	if !needsRemap {
@@ -85,24 +89,13 @@ func resolveSnapshotOptions(ctx context.Context, client *Client, snapshotterName
 		return "", fmt.Errorf("snapshotter %q doesn't support idmap mounts on this host, configure `slow_chown` to allow a slower and expensive fallback", snapshotterName)
 	}
 
-	var ctrUID, hostUID, length uint32
-	_, err = fmt.Sscanf(uidMap, "%d:%d:%d", &ctrUID, &hostUID, &length)
+	rootMap, err := idmap.RootPair()
 	if err != nil {
-		return "", fmt.Errorf("uidMap unparsable: %w", err)
-	}
-
-	var ctrGID, hostGID, lengthGID uint32
-	_, err = fmt.Sscanf(gidMap, "%d:%d:%d", &ctrGID, &hostGID, &lengthGID)
-	if err != nil {
-		return "", fmt.Errorf("gidMap unparsable: %w", err)
-	}
-
-	if ctrUID != 0 || ctrGID != 0 {
-		return "", fmt.Errorf("Container UID/GID of 0 only supported currently (%d/%d)", ctrUID, ctrGID)
+		return "", err
 	}
 
 	// TODO(dgl): length isn't taken into account for the intermediate snapshot id.
-	usernsID := fmt.Sprintf("%s-%d-%d", parent, hostUID, hostGID)
+	usernsID := fmt.Sprintf("%s-%d-%d", parent, rootMap.UID, rootMap.GID)
 	if _, err := snapshotter.Stat(ctx, usernsID); err == nil {
 		return usernsID, nil
 	}
@@ -111,10 +104,6 @@ func resolveSnapshotOptions(ctx context.Context, client *Client, snapshotterName
 		return "", err
 	}
 	// TODO(dgl): length isn't taken into account here yet either.
-	idmap := idtools.IdentityMapping{
-		UIDMaps: []idtools.IDMap{{ContainerID: int(ctrUID), HostID: int(hostUID), Size: int(length)}},
-		GIDMaps: []idtools.IDMap{{ContainerID: int(ctrGID), HostID: int(hostGID), Size: int(lengthGID)}},
-	}
 	if err := remapRootFS(ctx, mounts, idmap); err != nil {
 		snapshotter.Remove(ctx, usernsID+"-remap")
 		return "", err

@@ -20,6 +20,7 @@ package overlay
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -29,6 +30,7 @@ import (
 	"github.com/containerd/containerd/v2/core/mount"
 	"github.com/containerd/containerd/v2/core/snapshots"
 	"github.com/containerd/containerd/v2/core/snapshots/storage"
+	"github.com/containerd/containerd/v2/pkg/idtools"
 	"github.com/containerd/containerd/v2/plugins/snapshots/overlay/overlayutils"
 	"github.com/containerd/continuity/fs"
 	"github.com/containerd/log"
@@ -424,6 +426,7 @@ func (o *snapshotter) getCleanupDirectories(ctx context.Context) ([]string, erro
 	return cleanup, nil
 }
 
+//lint:ignore U1000 Ignore unused function
 func validateIDMapping(mapping string) error {
 	var (
 		hostID int
@@ -444,6 +447,7 @@ func validateIDMapping(mapping string) error {
 	return nil
 }
 
+//lint:ignore U1000 Ignore unused function
 func hostID(mapping string) (int, error) {
 	var (
 		hostID int
@@ -506,14 +510,15 @@ func (o *snapshotter) createSnapshot(ctx context.Context, kind snapshots.Kind, k
 		// will use bind mount. To be able to create file objects inside the
 		// rootfs -- just chown this only bound directory according to provided
 		// {uid,gid}map. In case of one/multiple parents -- chown upperdir.
-		if v, ok := info.Labels[snapshots.LabelSnapshotUIDMapping]; ok {
-			if mappedUID, err = hostID(v); err != nil {
-				return fmt.Errorf("failed to parse UID mapping: %w", err)
+		var idmap idtools.IdentityMapping
+		if v, ok := info.Labels[snapshots.LabelSnapshotUserNSMapping]; ok {
+			if err = json.Unmarshal([]byte(v), &idmap); err != nil {
+				return err
 			}
-		}
-		if v, ok := info.Labels[snapshots.LabelSnapshotGIDMapping]; ok {
-			if mappedGID, err = hostID(v); err != nil {
-				return fmt.Errorf("failed to parse GID mapping: %w", err)
+			if r, err := idmap.RootPair(); err != nil {
+				return err
+			} else {
+				mappedUID, mappedGID = r.UID, r.GID
 			}
 		}
 
@@ -574,11 +579,16 @@ func (o *snapshotter) mounts(s storage.Snapshot, info snapshots.Info) []mount.Mo
 	var options []string
 
 	if o.remapIDs {
-		if v, ok := info.Labels[snapshots.LabelSnapshotUIDMapping]; ok {
-			options = append(options, fmt.Sprintf("uidmap=%s", v))
-		}
-		if v, ok := info.Labels[snapshots.LabelSnapshotGIDMapping]; ok {
-			options = append(options, fmt.Sprintf("gidmap=%s", v))
+		var idmap idtools.IdentityMapping
+		if v, ok := info.Labels[snapshots.LabelSnapshotUserNSMapping]; ok {
+			if err := json.Unmarshal([]byte(v), &idmap); err == nil {
+				for _, u := range idmap.UIDMaps {
+					options = append(options, fmt.Sprintf("uidmap=%d:%d:%d", u.ContainerID, u.HostID, u.Size))
+				}
+				for _, g := range idmap.GIDMaps {
+					options = append(options, fmt.Sprintf("gidmap=%d:%d:%d", g.ContainerID, g.HostID, g.Size))
+				}
+			}
 		}
 	}
 

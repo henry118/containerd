@@ -125,16 +125,22 @@ type IdentityMapping struct {
 // RootPair returns a uid and gid pair for the root user. The error is ignored
 // because a root user always exists, and the defaults are correct when the uid
 // and gid maps are empty.
-func (i IdentityMapping) RootPair() Identity {
-	uid, gid, _ := GetRootUIDGID(i.UIDMaps, i.GIDMaps)
-	return Identity{UID: uid, GID: gid}
+func (i IdentityMapping) RootPair() (Identity, error) {
+	uid, gid, err := GetRootUIDGID(i.UIDMaps, i.GIDMaps)
+	if err != nil {
+		return Identity{}, err
+	}
+	return Identity{UID: uid, GID: gid}, nil
 }
 
 // ToHost returns the host UID and GID for the container uid, gid.
 // Remapping is only performed if the ids aren't already the remapped root ids
 func (i IdentityMapping) ToHost(pair Identity) (Identity, error) {
 	var err error
-	target := i.RootPair()
+	target, err := i.RootPair()
+	if err != nil {
+		return target, err
+	}
 
 	if pair.UID != target.UID {
 		target.UID, err = toHost(pair.UID, i.UIDMaps)

@@ -23,9 +23,9 @@ import (
 	"testing"
 
 	containerd "github.com/containerd/containerd/v2/client"
+	"github.com/containerd/containerd/v2/pkg/idtools"
 	"github.com/containerd/containerd/v2/pkg/oci"
 	"github.com/containerd/containerd/v2/plugins/snapshots/overlay/overlayutils"
-	"github.com/opencontainers/runtime-spec/specs-go"
 )
 
 func TestIDMappedOverlay(t *testing.T) {
@@ -54,28 +54,36 @@ func TestIDMappedOverlay(t *testing.T) {
 	}
 	t.Logf("image %s pulled!", testMultiLayeredImage)
 
-	hostID := uint32(33)
-	contID := uint32(0)
-	length := uint32(65536)
+	hostID := 33
+	contID := 0
+	length := 65536
 
-	uidMap := specs.LinuxIDMapping{
-		ContainerID: contID,
-		HostID:      hostID,
-		Size:        length,
+	idmap := idtools.IdentityMapping{
+		UIDMaps: []idtools.IDMap{
+			{
+				ContainerID: contID,
+				HostID:      hostID,
+				Size:        length,
+			},
+		},
+		GIDMaps: []idtools.IDMap{
+			{
+				ContainerID: contID,
+				HostID:      hostID,
+				Size:        length,
+			},
+		},
 	}
-	gidMap := specs.LinuxIDMapping{
-		ContainerID: contID,
-		HostID:      hostID,
-		Size:        length,
-	}
+
+	uidMap, gidMap := idmap.ToSpec()
 
 	container, err := client.NewContainer(ctx, id,
 		containerd.WithImage(image),
 		containerd.WithImageConfigLabels(image),
 		containerd.WithSnapshotter(snapshotter),
-		containerd.WithNewSnapshot(id, image, containerd.WithRemapperLabels(uidMap.ContainerID, uidMap.HostID, gidMap.ContainerID, gidMap.HostID, length)),
+		containerd.WithNewSnapshot(id, image, containerd.WithRemapperLabels(idmap)),
 		containerd.WithNewSpec(oci.WithImageConfig(image),
-			oci.WithUserNamespace([]specs.LinuxIDMapping{uidMap}, []specs.LinuxIDMapping{gidMap}),
+			oci.WithUserNamespace(uidMap, gidMap),
 			longCommand))
 	if err != nil {
 		t.Fatal(err)
@@ -117,7 +125,7 @@ func TestIDMappedOverlay(t *testing.T) {
 
 	if stat, ok := st.Sys().(*syscall.Stat_t); !ok {
 		t.Fatalf("incompatible types after stat call: *syscall.Stat_t expected")
-	} else if stat.Uid != uidMap.HostID || stat.Gid != gidMap.HostID {
-		t.Fatalf("bad mapping: expected {uid: %d, gid: %d}; real {uid: %d, gid: %d}", uidMap.HostID, gidMap.HostID, int(stat.Uid), int(stat.Gid))
+	} else if stat.Uid != uidMap[0].HostID || stat.Gid != gidMap[0].HostID {
+		t.Fatalf("bad mapping: expected {uid: %d, gid: %d}; real {uid: %d, gid: %d}", uidMap[0].HostID, gidMap[0].HostID, int(stat.Uid), int(stat.Gid))
 	}
 }

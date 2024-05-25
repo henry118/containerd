@@ -50,11 +50,13 @@ func withRemappedSnapshotBase(id string, i Image, idmap idtools.IdentityMapping,
 			return err
 		}
 
-		var (
-			parent   = identity.ChainID(diffIDs).String()
-			rootMap  = idmap.RootPair()
-			usernsID = fmt.Sprintf("%s-%d-%d", parent, rootMap.UID, rootMap.GID)
-		)
+		parent := identity.ChainID(diffIDs).String()
+		rootMap, err := idmap.RootPair()
+		if err != nil {
+			return err
+		}
+		usernsID := fmt.Sprintf("%s-%d-%d", parent, rootMap.UID, rootMap.GID)
+
 		c.Snapshotter, err = client.resolveSnapshotterName(ctx, c.Snapshotter)
 		if err != nil {
 			return err

@@ -39,6 +39,7 @@ import (
 	"github.com/containerd/containerd/v2/core/mount"
 	"github.com/containerd/containerd/v2/core/snapshots"
 	"github.com/containerd/containerd/v2/internal/cri/seutil"
+	"github.com/containerd/containerd/v2/pkg/idtools"
 	"github.com/containerd/containerd/v2/pkg/seccomp"
 )
 
@@ -343,7 +344,26 @@ func snapshotterRemapOpts(nsOpts *runtime.NamespaceOption) ([]snapshots.Opt, err
 	}
 
 	if usernsOpts.GetMode() == runtime.NamespaceMode_POD {
-		snapshotOpt = append(snapshotOpt, containerd.WithRemapperLabels(0, uids[0].HostID, 0, gids[0].HostID, uids[0].Size))
+		var idmap idtools.IdentityMapping
+		for _, u := range uids {
+			idmap.UIDMaps = append(idmap.UIDMaps,
+				idtools.IDMap{
+					ContainerID: int(u.ContainerID),
+					HostID:      int(u.HostID),
+					Size:        int(u.Size),
+				},
+			)
+		}
+		for _, g := range gids {
+			idmap.GIDMaps = append(idmap.GIDMaps,
+				idtools.IDMap{
+					ContainerID: int(g.ContainerID),
+					HostID:      int(g.HostID),
+					Size:        int(g.Size),
+				},
+			)
+		}
+		snapshotOpt = append(snapshotOpt, containerd.WithRemapperLabels(idmap))
 	}
 	return snapshotOpt, nil
 }

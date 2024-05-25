@@ -38,6 +38,7 @@ import (
 	. "github.com/containerd/containerd/v2/client"
 	"github.com/containerd/containerd/v2/core/containers"
 	"github.com/containerd/containerd/v2/pkg/cio"
+	"github.com/containerd/containerd/v2/pkg/idtools"
 	"github.com/containerd/containerd/v2/pkg/oci"
 	"github.com/containerd/containerd/v2/pkg/shim"
 	"github.com/containerd/containerd/v2/pkg/sys"
@@ -1150,26 +1151,33 @@ func testUserNamespaces(t *testing.T, readonlyRootFS bool) {
 		t.Fatal(err)
 	}
 
-	opts := []NewContainerOpts{WithNewSpec(oci.WithImageConfig(image),
-		withExitStatus(7),
-		oci.WithUserNamespace([]specs.LinuxIDMapping{
+	idmap := idtools.IdentityMapping{
+		UIDMaps: []idtools.IDMap{
 			{
 				ContainerID: 0,
 				HostID:      1000,
 				Size:        10000,
 			},
-		}, []specs.LinuxIDMapping{
+		},
+		GIDMaps: []idtools.IDMap{
 			{
 				ContainerID: 0,
 				HostID:      2000,
 				Size:        10000,
 			},
-		}),
+		},
+	}
+
+	uidMap, gidMap := idmap.ToSpec()
+
+	opts := []NewContainerOpts{WithNewSpec(oci.WithImageConfig(image),
+		withExitStatus(7),
+		oci.WithUserNamespace(uidMap, gidMap),
 	)}
 	if readonlyRootFS {
-		opts = append([]NewContainerOpts{WithRemappedSnapshotView(id, image, 1000, 2000)}, opts...)
+		opts = append([]NewContainerOpts{WithRemappedSnapshotView(id, image, idmap)}, opts...)
 	} else {
-		opts = append([]NewContainerOpts{WithRemappedSnapshot(id, image, 1000, 2000)}, opts...)
+		opts = append([]NewContainerOpts{WithRemappedSnapshot(id, image, idmap)}, opts...)
 	}
 
 	container, err := client.NewContainer(ctx, id, opts...)
