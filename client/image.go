@@ -332,8 +332,9 @@ func (i *image) Unpack(ctx context.Context, snapshotterName string, opts ...Unpa
 		}
 	}
 
+	var wg sync.WaitGroup
 	for _, layer := range layers {
-		unpacked, err = rootfs.ApplyLayerWithOpts(ctx, layer, chain, sn, a, config.SnapshotOpts, config.ApplyOpts)
+		unpacked, err = rootfs.ApplyLayerWithOpts(ctx, layer, chain, sn, a, config.SnapshotOpts, config.ApplyOpts, &wg)
 		if err != nil {
 			return fmt.Errorf("apply layer error for %q: %w", i.Name(), err)
 		}
@@ -354,6 +355,7 @@ func (i *image) Unpack(ctx context.Context, snapshotterName string, opts ...Unpa
 
 		chain = append(chain, layer.Diff.Digest)
 	}
+	wg.Wait()
 
 	desc, err := i.i.Config(ctx, cs, i.platform)
 	if err != nil {

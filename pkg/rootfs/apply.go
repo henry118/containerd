@@ -21,6 +21,7 @@ import (
 	"crypto/rand"
 	"encoding/base64"
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/containerd/containerd/v2/core/diff"
@@ -70,7 +71,7 @@ func ApplyLayersWithOpts(ctx context.Context, layers []Layer, sn snapshots.Snaps
 			return "", fmt.Errorf("failed to stat snapshot %s: %w", chainID, err)
 		}
 
-		if err := applyLayers(ctx, layers, chain, sn, a, nil, applyOpts); err != nil && !errdefs.IsAlreadyExists(err) {
+		if err := applyLayers(ctx, layers, chain, sn, a, nil, applyOpts, nil); err != nil && !errdefs.IsAlreadyExists(err) {
 			return "", err
 		}
 	}
@@ -82,13 +83,13 @@ func ApplyLayersWithOpts(ctx context.Context, layers []Layer, sn snapshots.Snaps
 // using the provided snapshotter and applier. If the layer was unpacked true
 // is returned, if the layer already exists false is returned.
 func ApplyLayer(ctx context.Context, layer Layer, chain []digest.Digest, sn snapshots.Snapshotter, a diff.Applier, opts ...snapshots.Opt) (bool, error) {
-	return ApplyLayerWithOpts(ctx, layer, chain, sn, a, opts, nil)
+	return ApplyLayerWithOpts(ctx, layer, chain, sn, a, opts, nil, nil)
 }
 
 // ApplyLayerWithOpts applies a single layer on top of the given provided layer chain,
 // using the provided snapshotter, applier, and apply opts. If the layer was unpacked true
 // is returned, if the layer already exists false is returned.
-func ApplyLayerWithOpts(ctx context.Context, layer Layer, chain []digest.Digest, sn snapshots.Snapshotter, a diff.Applier, opts []snapshots.Opt, applyOpts []diff.ApplyOpt) (bool, error) {
+func ApplyLayerWithOpts(ctx context.Context, layer Layer, chain []digest.Digest, sn snapshots.Snapshotter, a diff.Applier, opts []snapshots.Opt, applyOpts []diff.ApplyOpt, wg *sync.WaitGroup) (bool, error) {
 	var (
 		chainID = identity.ChainID(append(chain, layer.Diff.Digest)).String()
 		applied bool
@@ -98,7 +99,7 @@ func ApplyLayerWithOpts(ctx context.Context, layer Layer, chain []digest.Digest,
 			return false, fmt.Errorf("failed to stat snapshot %s: %w", chainID, err)
 		}
 
-		if err := applyLayers(ctx, []Layer{layer}, append(chain, layer.Diff.Digest), sn, a, opts, applyOpts); err != nil {
+		if err := applyLayers(ctx, []Layer{layer}, append(chain, layer.Diff.Digest), sn, a, opts, applyOpts, wg); err != nil {
 			if !errdefs.IsAlreadyExists(err) {
 				return false, err
 			}
@@ -110,7 +111,7 @@ func ApplyLayerWithOpts(ctx context.Context, layer Layer, chain []digest.Digest,
 
 }
 
-func applyLayers(ctx context.Context, layers []Layer, chain []digest.Digest, sn snapshots.Snapshotter, a diff.Applier, opts []snapshots.Opt, applyOpts []diff.ApplyOpt) error {
+func applyLayers(ctx context.Context, layers []Layer, chain []digest.Digest, sn snapshots.Snapshotter, a diff.Applier, opts []snapshots.Opt, applyOpts []diff.ApplyOpt, wg *sync.WaitGroup) error {
 	var (
 		parent  = identity.ChainID(chain[:len(chain)-1])
 		chainID = identity.ChainID(chain)
@@ -128,7 +129,7 @@ func applyLayers(ctx context.Context, layers []Layer, chain []digest.Digest, sn 
 		mounts, err = sn.Prepare(ctx, key, parent.String(), opts...)
 		if err != nil {
 			if errdefs.IsNotFound(err) && len(layers) > 1 {
-				if err := applyLayers(ctx, layers[:len(layers)-1], chain[:len(chain)-1], sn, a, opts, applyOpts); err != nil {
+				if err := applyLayers(ctx, layers[:len(layers)-1], chain[:len(chain)-1], sn, a, opts, applyOpts, wg); err != nil {
 					if !errdefs.IsAlreadyExists(err) {
 						return err
 					}
@@ -159,20 +160,25 @@ func applyLayers(ctx context.Context, layers []Layer, chain []digest.Digest, sn 
 		}
 	}()
 
-	diff, err = a.Apply(ctx, layer.Blob, mounts, applyOpts...)
-	if err != nil {
-		err = fmt.Errorf("failed to extract layer %s: %w", layer.Diff.Digest, err)
-		return err
-	}
-	if diff.Digest != layer.Diff.Digest {
-		err = fmt.Errorf("wrong diff id calculated on extraction %q", diff.Digest)
-		return err
-	}
-
 	if err = sn.Commit(ctx, chainID.String(), key, opts...); err != nil {
 		err = fmt.Errorf("failed to commit snapshot %s: %w", key, err)
 		return err
 	}
+
+	wg.Add(1)
+	go func() error {
+		diff, err = a.Apply(ctx, layer.Blob, mounts, applyOpts...)
+		if err != nil {
+			err = fmt.Errorf("failed to extract layer %s: %w", layer.Diff.Digest, err)
+			return err
+		}
+		if diff.Digest != layer.Diff.Digest {
+			err = fmt.Errorf("wrong diff id calculated on extraction %q", diff.Digest)
+			return err
+		}
+		wg.Done()
+		return nil
+	}()
 
 	return nil
 }
