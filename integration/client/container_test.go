@@ -2727,3 +2727,56 @@ func TestContainerPTY(t *testing.T) {
 		t.Fatal(`expected \x00 in output`)
 	}
 }
+
+// Test case for https://github.com/containerd/containerd/pull/2807
+func TestCreatedContainerPTYBrokenStdin(t *testing.T) {
+	t.Parallel()
+
+	client, err := newClient(t, address)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+
+	var (
+		image       Image
+		ctx, cancel = testContext(t)
+		id          = t.Name()
+	)
+	defer cancel()
+
+	image, err = client.GetImage(ctx, testImage)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	container, err := client.NewContainer(ctx, id, WithNewSnapshot(id, image), WithNewSpec(oci.WithImageConfig(image), oci.WithTTY, withProcessArgs("sleep", "1d")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer container.Delete(ctx, WithSnapshotCleanup)
+
+	ioc := func(streams *cio.Streams) {
+		streams.Stdin = bytes.NewBuffer(nil)
+		streams.Stdout = io.Discard
+	}
+	task, err := container.NewTask(ctx, cio.NewCreator(ioc, withProcessTTY()))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// stdin fifo is opened twice, by client and shim respectively
+	// thus we need to close both to simulate broken pipe and
+	// trigger an EOF on the other end
+	if err = task.IO().Close(); err != nil {
+		t.Error(err)
+	}
+	if err = task.CloseIO(ctx, WithStdinCloser); err != nil {
+		t.Error(err)
+	}
+
+	_, err = task.Delete(ctx, WithProcessKill)
+	if err != nil {
+		t.Error(err)
+	}
+}
