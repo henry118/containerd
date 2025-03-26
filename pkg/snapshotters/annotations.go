@@ -18,6 +18,10 @@ package snapshotters
 
 import (
 	"context"
+	"encoding/base64"
+	"fmt"
+	"math/rand"
+	"time"
 
 	"github.com/containerd/containerd/images"
 	"github.com/containerd/containerd/labels"
@@ -42,6 +46,12 @@ const (
 	// the target image and will be passed to snapshotters for preparing layers in
 	// parallel. Skipping some layers is allowed and only affects performance.
 	TargetImageLayersLabel = "containerd.io/snapshot/cri.image-layers"
+
+	// TargetImagePullIDLabel is a label which uniquely identifies an image pull.
+	// It will be passed to the snapshotters for preparing layers in the image.
+	// Concurrently pulling the same image will result in different TargetImagePullIDLabels
+	// passed to the snapshotter to distinguish the two image pull jobs.
+	TargetImagePullIDLabel = "containerd.io/snapshot/cri.image-pull-id"
 )
 
 // AppendInfoHandlerWrapper makes a handler which appends some basic information
@@ -67,6 +77,7 @@ func AppendInfoHandlerWrapper(ref string) func(f images.Handler) images.Handler 
 						c.Annotations[TargetLayerDigestLabel] = c.Digest.String()
 						c.Annotations[TargetImageLayersLabel] = getLayers(ctx, TargetImageLayersLabel, children[i:], labels.Validate)
 						c.Annotations[TargetManifestDigestLabel] = desc.Digest.String()
+						c.Annotations[TargetImagePullIDLabel] = getImagePullID(ref)
 					}
 				}
 			}
@@ -94,4 +105,11 @@ func getLayers(ctx context.Context, key string, descs []ocispec.Descriptor, vali
 		}
 	}
 	return
+}
+
+// getImagePullID returns an unique identifier of an image pull job.
+func getImagePullID(ref string) string {
+	var b [3]byte
+	rand.Read(b[:])
+	return fmt.Sprintf("%s-%d-%s", ref, time.Now().Nanosecond(), base64.URLEncoding.EncodeToString(b[:]))
 }
