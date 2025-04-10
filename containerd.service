@@ -19,7 +19,7 @@ After=network.target local-fs.target dbus.service
 
 [Service]
 ExecStartPre=-/sbin/modprobe overlay
-ExecStart=/usr/local/bin/containerd
+ExecStart=/usr/bin/containerd
 
 Type=notify
 Delegate=yes
@@ -31,11 +31,15 @@ RestartSec=5
 # in the kernel. We recommend using cgroups to do container-local accounting.
 LimitNPROC=infinity
 LimitCORE=infinity
+LimitNOFILE=infinity
 
 # Comment TasksMax if your systemd version does not supports it.
 # Only systemd 226 and above support this version.
 TasksMax=infinity
 OOMScoreAdjust=-999
+
+# Enable image schema v1
+Environment="CONTAINERD_ENABLE_DEPRECATED_PULL_SCHEMA_1_IMAGE=1"
 
 [Install]
 WantedBy=multi-user.target
