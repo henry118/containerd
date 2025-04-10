@@ -37,5 +37,8 @@ LimitCORE=infinity
 TasksMax=infinity
 OOMScoreAdjust=-999
 
+# Enable image schema v1
+Environment="CONTAINERD_ENABLE_DEPRECATED_PULL_SCHEMA_1_IMAGE=1"
+
 [Install]
 WantedBy=multi-user.target
