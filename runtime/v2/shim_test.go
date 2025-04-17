@@ -69,8 +69,17 @@ func TestParseStartResponse(t *testing.T) {
 			},
 		},
 		{
-			Name:     "later unsupported shim",
+			Name:     "v3 shim",
 			Response: `{"Version": 3,"Address":"/somedirectory/somesocket","Protocol":"ttrpc"}`,
+			Expected: client.BootstrapParams{
+				Version:  3,
+				Address:  "/somedirectory/somesocket",
+				Protocol: "ttrpc",
+			},
+		},
+		{
+			Name:     "later unsupported shim",
+			Response: `{"Version": 4,"Address":"/somedirectory/somesocket","Protocol":"ttrpc"}`,
 			Expected: client.BootstrapParams{},
 			Err:      errdefs.ErrNotImplemented,
 		},

@@ -35,7 +35,7 @@ import (
 	"google.golang.org/grpc/credentials/insecure"
 
 	eventstypes "github.com/containerd/containerd/api/events"
-	"github.com/containerd/containerd/api/runtime/task/v2"
+	"github.com/containerd/containerd/api/runtime/task/v3"
 	"github.com/containerd/containerd/api/types"
 	"github.com/containerd/containerd/errdefs"
 	"github.com/containerd/containerd/events/exchange"
@@ -68,12 +68,39 @@ func loadAddress(path string) ([]byte, error) {
 	return data, nil
 }
 
-func loadShim(ctx context.Context, bundle *Bundle, onClose func()) (_ ShimInstance, retErr error) {
-	address, err := loadAddress(filepath.Join(bundle.Path, "address"))
+func readBootstrapParams(path string) (client.BootstrapParams, error) {
+	path, err := filepath.Abs(path)
 	if err != nil {
-		return nil, err
+		return client.BootstrapParams{}, err
 	}
 
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return client.BootstrapParams{}, err
+	}
+
+	return parseStartResponse(context.TODO(), data)
+}
+
+func restoreBootstrapParams(ctx context.Context, bundlePath string) (client.BootstrapParams, error) {
+	filePath := filepath.Join(bundlePath, "bootstrap.json")
+
+	// Read bootstrap.json if exists
+	if _, err := os.Stat(filePath); err == nil {
+		return readBootstrapParams(filePath)
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return client.BootstrapParams{}, fmt.Errorf("failed to stat %s: %w", filePath, err)
+	}
+
+	// File not found, likely its an older shim. Try migrate.
+	address, err := loadAddress(filepath.Join(bundlePath, "address"))
+	if err != nil {
+		return client.BootstrapParams{}, fmt.Errorf("unable to migrate shim: failed to get socket address for bundle %s: %w", bundlePath, err)
+	}
+	return parseStartResponse(ctx, address)
+}
+
+func loadShim(ctx context.Context, bundle *Bundle, onClose func()) (_ ShimInstance, retErr error) {
 	shimCtx, cancelShimLog := context.WithCancel(ctx)
 	defer func() {
 		if retErr != nil {
@@ -109,7 +136,7 @@ func loadShim(ctx context.Context, bundle *Bundle, onClose func()) (_ ShimInstan
 		f.Close()
 	}
 
-	params, err := parseStartResponse(ctx, address)
+	params, err := restoreBootstrapParams(ctx, bundle.Path)
 	if err != nil {
 		return nil, err
 	}
@@ -125,9 +152,14 @@ func loadShim(ctx context.Context, bundle *Bundle, onClose func()) (_ ShimInstan
 		}
 	}()
 
+	// The address is in the form like ttrpc+unix://<uds-path> or grpc+vsock://<cid>:<port>
+	address := fmt.Sprintf("%s+%s", params.Protocol, params.Address)
+
 	shim := &shim{
-		bundle: bundle,
-		client: conn,
+		bundle:  bundle,
+		client:  conn,
+		address: address,
+		version: params.Version,
 	}
 
 	ctx, cancel := timeout.WithContext(ctx, loadTimeout)
@@ -206,6 +238,9 @@ type ShimInstance interface {
 	Client() any
 	// Delete will close the client and remove bundle from disk.
 	Delete(ctx context.Context) error
+	// Endpoint returns shim's endpoint information,
+	// including address and version.
+	Endpoint() (string, int)
 }
 
 func parseStartResponse(ctx context.Context, response []byte) (client.BootstrapParams, error) {
@@ -217,7 +252,7 @@ func parseStartResponse(ctx context.Context, response []byte) (client.BootstrapP
 		params.Protocol = "ttrpc"
 	}
 
-	if params.Version > 2 {
+	if params.Version > 3 {
 		return client.BootstrapParams{}, fmt.Errorf("unsupported shim version (%d): %w", params.Version, errdefs.ErrNotImplemented)
 	}
 
@@ -336,8 +371,10 @@ func (gc *grpcConn) UserOnCloseWait(ctx context.Context) error {
 }
 
 type shim struct {
-	bundle *Bundle
-	client any
+	bundle  *Bundle
+	client  any
+	address string
+	version int
 }
 
 var _ ShimInstance = (*shim)(nil)
@@ -345,6 +382,10 @@ var _ ShimInstance = (*shim)(nil)
 // ID of the shim/task
 func (s *shim) ID() string {
 	return s.bundle.ID
+}
+
+func (s *shim) Endpoint() (string, int) {
+	return s.address, s.version
 }
 
 func (s *shim) Namespace() string {
@@ -408,11 +449,12 @@ var _ runtime.Task = &shimTask{}
 // shimTask wraps shim process and adds task service client for compatibility with existing shim manager.
 type shimTask struct {
 	ShimInstance
-	task task.TaskService
+	task TaskServiceClient
 }
 
 func newShimTask(shim ShimInstance) (*shimTask, error) {
-	taskClient, err := NewTaskClient(shim.Client())
+	_, version := shim.Endpoint()
+	taskClient, err := NewTaskClient(shim.Client(), version)
 	if err != nil {
 		return nil, err
 	}
