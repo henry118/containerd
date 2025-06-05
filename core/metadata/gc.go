@@ -700,11 +700,24 @@ func (c *gcContext) remove(ctx context.Context, tx *bolt.Tx, node gc.Node) (inte
 			}
 			ssbkt := sbkt.Bucket([]byte(ss))
 			if ssbkt != nil {
-				log.G(ctx).WithField("key", key).WithField("snapshotter", ss).Debug("remove snapshot")
-				return &eventstypes.SnapshotRemove{
-					Key:         key,
-					Snapshotter: ss,
-				}, ssbkt.DeleteBucket([]byte(key))
+				snbkt := ssbkt.Bucket([]byte(key))
+				if snbkt != nil {
+					log.G(ctx).WithField("key", key).WithField("snapshotter", ss).Debug("remove snapshot")
+					parent := snbkt.Get(bucketKeyParent)
+					if len(parent) > 0 {
+						pbkt := ssbkt.Bucket(parent)
+						if pbkt != nil {
+							cbkt := pbkt.Bucket(bucketKeyChildren)
+							if cbkt != nil {
+								cbkt.Delete([]byte(key))
+							}
+						}
+					}
+					return &eventstypes.SnapshotRemove{
+						Key:         key,
+						Snapshotter: ss,
+					}, ssbkt.DeleteBucket([]byte(key))
+				}
 			}
 		}
 	case ResourceImage:
