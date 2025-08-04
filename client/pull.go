@@ -243,6 +243,7 @@ func (c *Client) fetch(ctx context.Context, rCtx *RemoteContext, ref string, lim
 		convertibleHandler,
 		childrenHandler,
 		appendDistSrcLabelHandler,
+		unpack.UnpackHandler(c.DiffService(), "/var/lib/containerd/unpack"),
 	)
 
 	handler = images.Handlers(handlers...)
