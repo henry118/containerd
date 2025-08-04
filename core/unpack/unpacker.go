@@ -23,6 +23,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strconv"
 	"sync"
 	"sync/atomic"
@@ -609,4 +611,32 @@ func uniquePart() string {
 	// Ignore read failures, just decreases uniqueness
 	rand.Read(b[:])
 	return fmt.Sprintf("%d-%s", t.Nanosecond(), base64.URLEncoding.EncodeToString(b[:]))
+}
+
+// UnpackHandler returns a handler that will unpack a layer blob into a designated
+// directory in a call to Dispatch.
+func UnpackHandler(applier diff.Applier, location string) images.HandlerFunc {
+	return func(ctx context.Context, desc ocispec.Descriptor) ([]ocispec.Descriptor, error) {
+		ctx = log.WithLogger(ctx, log.G(ctx).WithFields(log.Fields{
+			"digest":    desc.Digest,
+			"mediatype": desc.MediaType,
+			"size":      desc.Size,
+		}))
+
+		var err error
+		if images.IsLayerType(desc.MediaType) {
+			unpackDir := filepath.Join(location, desc.Digest.Encoded())
+			mounts := []mount.Mount{
+				{
+					Type:    "overlay",
+					Source:  "overlay",
+					Options: []string{fmt.Sprintf("upperdir=%s", unpackDir)},
+				},
+			}
+			os.MkdirAll(unpackDir, 0755)
+			_, err = applier.Apply(ctx, desc, mounts)
+		}
+
+		return nil, err
+	}
 }
