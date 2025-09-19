@@ -451,7 +451,7 @@ func (u *Unpacker) unpack(
 		// 	return fmt.Errorf("wrong diff id calculated on extraction %q", diffIDs[i])
 		// }
 
-		dgst, err := rebaseSnapshot(mounts, filepath.Join("/var/lib/containerd/unpack", desc.Digest.Encoded()))
+		dgst, err := rebaseSnapshot(mounts, desc)
 		if err != nil {
 			cleanup.Do(ctx, abort)
 			return fmt.Errorf("failed to rebase layer %s: %w", desc.Digest, err)
@@ -633,7 +633,7 @@ func unpackHandler(h images.Handler, applier diff.Applier) images.HandlerFunc {
 
 		if images.IsLayerType(desc.MediaType) {
 			// TODO configure unpack directory
-			unpackDir := filepath.Join("/var/lib/containerd/unpack", desc.Digest.Encoded())
+			unpackDir := filepath.Join("/var/lib/containerd/unpack", uniquePart())
 			fsDir := filepath.Join(unpackDir, "fs")
 			mounts := []mount.Mount{
 				{
@@ -647,6 +647,9 @@ func unpackHandler(h images.Handler, applier diff.Applier) images.HandlerFunc {
 			}
 			diff, err := applier.Apply(ctx, desc, mounts)
 			if err != nil {
+				return nil, err
+			}
+			if err := os.WriteFile(filepath.Join(unpackDir, "digest"), []byte(desc.Digest.String()), 0600); err != nil {
 				return nil, err
 			}
 			if err := os.WriteFile(filepath.Join(unpackDir, "diff"), []byte(diff.Digest.String()), 0600); err != nil {
@@ -692,33 +695,57 @@ func getOverlayPath(options []string) (upper string, lower []string, err error) 
 	return
 }
 
-func rebaseSnapshot(mounts []mount.Mount, source string) (digest.Digest, error) {
-	info, err := os.Stat(source)
-	if err != nil {
-		return "", err
-	}
-	if !info.IsDir() {
-		return "", fmt.Errorf("source %q is not a directory: %w", source, errdefs.ErrInvalidArgument)
-	}
-
+func rebaseSnapshot(mounts []mount.Mount, desc ocispec.Descriptor) (digest.Digest, error) {
 	dest, err := getRebasePath(mounts)
 	if err != nil {
 		return "", err
 	}
+	unpacks, err := os.ReadDir("/var/lib/containerd/unpack")
+	if err != nil {
+		return "", err
+	}
+	rebase := func(source, dest string) (digest.Digest, error) {
+		b, err := os.ReadFile(filepath.Join(source, "digest"))
+		if err != nil {
+			return "", err
+		}
+		dgst, err := digest.Parse(string(b))
+		if err != nil {
+			return "", err
+		}
+		if dgst != desc.Digest {
+			return "", fmt.Errorf("digest does not match")
+		}
+
+		if err := os.Rename(filepath.Join(source, "fs"), dest); err != nil {
+			return "", err
+		}
+
+		b, err = os.ReadFile(filepath.Join(source, "diff"))
+		if err != nil {
+			return "", err
+		}
+		diff, err := digest.Parse(string(b))
+		if err != nil {
+			return "", err
+		}
+
+		os.RemoveAll(source)
+		return diff, nil
+	}
+
 	if err := os.RemoveAll(dest); err != nil {
 		return "", err
 	}
-	if err := os.Rename(filepath.Join(source, "fs"), dest); err != nil {
-		return "", err
+
+	for _, u := range unpacks {
+		if u.IsDir() {
+			dgst, err := rebase(filepath.Join("/var/lib/containerd/unpack", u.Name()), dest)
+			if err == nil {
+				return dgst, nil
+			}
+		}
 	}
 
-	b, err := os.ReadFile(filepath.Join(source, "diff"))
-	if err != nil {
-		return "", err
-	}
-	dgst, err := digest.Parse(string(b))
-	if err != nil {
-		return "", err
-	}
-	return dgst, nil
+	return "", fmt.Errorf("unable to find unpacked layer for %s: %w", desc.Digest, errdefs.ErrNotFound)
 }
