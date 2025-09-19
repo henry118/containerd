@@ -26,6 +26,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -333,7 +334,7 @@ func (u *Unpacker) unpack(
 
 	var (
 		sn = unpack.Snapshotter
-		a  = unpack.Applier
+		//a  = unpack.Applier
 		cs = u.content
 
 		fetchOffset int
@@ -420,7 +421,7 @@ func (u *Unpacker) unpack(
 			}
 
 			go func(i int) {
-				err := u.fetch(ctx, h, layers[i:], fetchC)
+				err := u.fetch(ctx, unpackHandler(h, unpack.Applier), layers[i:], fetchC)
 				if err != nil {
 					fetchErr <- err
 				}
@@ -440,14 +441,24 @@ func (u *Unpacker) unpack(
 		case <-fetchC[i-fetchOffset]:
 		}
 
-		diff, err := a.Apply(ctx, desc, mounts, unpack.ApplyOpts...)
+		// diff, err := a.Apply(ctx, desc, mounts, unpack.ApplyOpts...)
+		// if err != nil {
+		// 	cleanup.Do(ctx, abort)
+		// 	return fmt.Errorf("failed to extract layer (%s %s) to %s as %q: %w", desc.MediaType, desc.Digest, unpack.SnapshotterKey, key, err)
+		// }
+		// if diff.Digest != diffIDs[i] {
+		// 	cleanup.Do(ctx, abort)
+		// 	return fmt.Errorf("wrong diff id calculated on extraction %q", diffIDs[i])
+		// }
+
+		dgst, err := rebaseSnapshot(mounts, filepath.Join("/var/lib/containerd/unpack", desc.Digest.Encoded()))
 		if err != nil {
 			cleanup.Do(ctx, abort)
-			return fmt.Errorf("failed to extract layer (%s %s) to %s as %q: %w", desc.MediaType, desc.Digest, unpack.SnapshotterKey, key, err)
+			return fmt.Errorf("failed to rebase layer %s: %w", desc.Digest, err)
 		}
-		if diff.Digest != diffIDs[i] {
+		if dgst != diffIDs[i] {
 			cleanup.Do(ctx, abort)
-			return fmt.Errorf("wrong diff id calculated on extraction %q", diffIDs[i])
+			return fmt.Errorf("wrong diff id %q calculated on extraction %q", dgst, diffIDs[i])
 		}
 
 		if err = sn.Commit(ctx, chainID, key, opts...); err != nil {
@@ -463,7 +474,7 @@ func (u *Unpacker) unpack(
 		cinfo := content.Info{
 			Digest: desc.Digest,
 			Labels: map[string]string{
-				labels.LabelUncompressed: diff.Digest.String(),
+				labels.LabelUncompressed: diffIDs[i].String(),
 			},
 		}
 		if _, err := cs.Update(ctx, cinfo, "labels."+labels.LabelUncompressed); err != nil {
@@ -613,30 +624,101 @@ func uniquePart() string {
 	return fmt.Sprintf("%d-%s", t.Nanosecond(), base64.URLEncoding.EncodeToString(b[:]))
 }
 
-// UnpackHandler returns a handler that will unpack a layer blob into a designated
-// directory in a call to Dispatch.
-func UnpackHandler(applier diff.Applier, location string) images.HandlerFunc {
-	return func(ctx context.Context, desc ocispec.Descriptor) ([]ocispec.Descriptor, error) {
-		ctx = log.WithLogger(ctx, log.G(ctx).WithFields(log.Fields{
-			"digest":    desc.Digest,
-			"mediatype": desc.MediaType,
-			"size":      desc.Size,
-		}))
+func unpackHandler(h images.Handler, applier diff.Applier) images.HandlerFunc {
+	return images.HandlerFunc(func(ctx context.Context, desc ocispec.Descriptor) ([]ocispec.Descriptor, error) {
+		children, err := h.Handle(ctx, desc)
+		if err != nil {
+			return children, err
+		}
 
-		var err error
 		if images.IsLayerType(desc.MediaType) {
-			unpackDir := filepath.Join(location, desc.Digest.Encoded())
+			// TODO configure unpack directory
+			unpackDir := filepath.Join("/var/lib/containerd/unpack", desc.Digest.Encoded())
+			fsDir := filepath.Join(unpackDir, "fs")
 			mounts := []mount.Mount{
 				{
 					Type:    "overlay",
 					Source:  "overlay",
-					Options: []string{fmt.Sprintf("upperdir=%s", unpackDir)},
+					Options: []string{fmt.Sprintf("upperdir=%s", fsDir)},
 				},
 			}
-			os.MkdirAll(unpackDir, 0755)
-			_, err = applier.Apply(ctx, desc, mounts)
+			if err := os.MkdirAll(fsDir, 0711); err != nil {
+				return nil, err
+			}
+			diff, err := applier.Apply(ctx, desc, mounts)
+			if err != nil {
+				return nil, err
+			}
+			if err := os.WriteFile(filepath.Join(unpackDir, "diff"), []byte(diff.Digest.String()), 0600); err != nil {
+				return nil, err
+			}
 		}
 
-		return nil, err
+		return children, err
+	})
+}
+
+func getRebasePath(mounts []mount.Mount) (string, error) {
+	if len(mounts) == 1 {
+		switch mounts[0].Type {
+		case "overlay":
+			path, _, err := getOverlayPath(mounts[0].Options)
+			if err != nil {
+				return "", err
+			}
+			return path, nil
+		case "bind":
+			return mounts[0].Source, nil
+		}
 	}
+	return "", fmt.Errorf("unable to determine rebase path from mounts: %+v", mounts)
+}
+
+func getOverlayPath(options []string) (upper string, lower []string, err error) {
+	const upperdirPrefix = "upperdir="
+	const lowerdirPrefix = "lowerdir="
+
+	for _, o := range options {
+		if strings.HasPrefix(o, upperdirPrefix) {
+			upper = strings.TrimPrefix(o, upperdirPrefix)
+		} else if strings.HasPrefix(o, lowerdirPrefix) {
+			lower = strings.Split(strings.TrimPrefix(o, lowerdirPrefix), ":")
+		}
+	}
+	if upper == "" {
+		return "", nil, fmt.Errorf("upperdir not found: %w", errdefs.ErrInvalidArgument)
+	}
+
+	return
+}
+
+func rebaseSnapshot(mounts []mount.Mount, source string) (digest.Digest, error) {
+	info, err := os.Stat(source)
+	if err != nil {
+		return "", err
+	}
+	if !info.IsDir() {
+		return "", fmt.Errorf("source %q is not a directory: %w", source, errdefs.ErrInvalidArgument)
+	}
+
+	dest, err := getRebasePath(mounts)
+	if err != nil {
+		return "", err
+	}
+	if err := os.RemoveAll(dest); err != nil {
+		return "", err
+	}
+	if err := os.Rename(filepath.Join(source, "fs"), dest); err != nil {
+		return "", err
+	}
+
+	b, err := os.ReadFile(filepath.Join(source, "diff"))
+	if err != nil {
+		return "", err
+	}
+	dgst, err := digest.Parse(string(b))
+	if err != nil {
+		return "", err
+	}
+	return dgst, nil
 }
