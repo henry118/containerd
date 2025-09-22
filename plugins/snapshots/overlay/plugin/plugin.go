@@ -30,8 +30,9 @@ import (
 )
 
 const (
-	capaRemapIDs     = "remap-ids"
-	capaOnlyRemapIDs = "only-remap-ids"
+	capaRemapIDs        = "remap-ids"
+	capaOnlyRemapIDs    = "only-remap-ids"
+	capaParrallelUnpack = "parallel-unpack"
 )
 
 // Config represents configuration for the overlay plugin.
@@ -91,6 +92,8 @@ func init() {
 				// allow idmap mounts.
 				ic.Meta.Capabilities = append(ic.Meta.Capabilities, capaOnlyRemapIDs)
 			}
+
+			ic.Meta.Capabilities = append(ic.Meta.Capabilities, capaParrallelUnpack)
 
 			ic.Meta.Exports[plugins.SnapshotterRootDir] = root
 			return overlay.NewSnapshotter(root, oOpts...)

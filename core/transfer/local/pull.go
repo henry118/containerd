@@ -217,6 +217,10 @@ func (ts *localTransferService) pull(ctx context.Context, ir transfer.ImageFetch
 				uopts = append(uopts, unpack.WithDuplicationSuppressor(ts.config.DuplicationSuppressor))
 			}
 
+			if ts.config.ConcurrentUnpack {
+				uopts = append(uopts, unpack.WithParallel(true))
+			}
+
 			if enableRemoteSnapshotAnnotations {
 				handler = snpkg.AppendInfoHandlerWrapper(name)(handler)
 			}

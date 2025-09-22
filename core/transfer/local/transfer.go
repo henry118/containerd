@@ -199,4 +199,7 @@ type TransferConfig struct {
 
 	// RegistryConfigPath is a path to the root directory containing registry-specific configurations
 	RegistryConfigPath string
+
+	// ConcurrentUnpack enables parallel unpacking of layers when the snapshotter supports it.
+	ConcurrentUnpack bool
 }

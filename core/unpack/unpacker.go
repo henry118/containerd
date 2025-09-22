@@ -23,10 +23,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"os"
-	"path/filepath"
 	"strconv"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -67,6 +64,8 @@ type unpackerConfig struct {
 
 	limiter               Limiter
 	duplicationSuppressor KeyedLocker
+
+	parallel bool
 }
 
 // Platform represents a platform-specific unpack configuration which includes
@@ -74,10 +73,11 @@ type unpackerConfig struct {
 type Platform struct {
 	Platform platforms.Matcher
 
-	SnapshotterKey     string
-	Snapshotter        snapshots.Snapshotter
-	SnapshotOpts       []snapshots.Opt
-	SnapshotterExports map[string]string
+	SnapshotterKey          string
+	Snapshotter             snapshots.Snapshotter
+	SnapshotOpts            []snapshots.Opt
+	SnapshotterExports      map[string]string
+	SnapshotterCapabilities []string
 
 	Applier   diff.Applier
 	ApplyOpts []diff.ApplyOpt
@@ -142,6 +142,13 @@ func WithLimiter(l Limiter) UnpackerOpt {
 func WithDuplicationSuppressor(d KeyedLocker) UnpackerOpt {
 	return UnpackerOpt(func(c *unpackerConfig) error {
 		c.duplicationSuppressor = d
+		return nil
+	})
+}
+
+func WithParallel(parallel bool) UnpackerOpt {
+	return UnpackerOpt(func(c *unpackerConfig) error {
+		c.parallel = parallel
 		return nil
 	})
 }
@@ -334,12 +341,15 @@ func (u *Unpacker) unpack(
 
 	var (
 		sn = unpack.Snapshotter
-		//a  = unpack.Applier
+		a  = unpack.Applier
 		cs = u.content
 
 		fetchOffset int
 		fetchC      []chan struct{}
 		fetchErr    chan error
+
+		parallel   = u.supportParrallelUnpack(unpack)
+		unpackRoot = tempUnpackRoot(unpack)
 	)
 
 	// If there is an early return, ensure any ongoing
@@ -351,6 +361,11 @@ func (u *Unpacker) unpack(
 	chainIDs := make([]digest.Digest, len(diffIDs))
 	copy(chainIDs, diffIDs)
 	chainIDs = identity.ChainIDs(chainIDs)
+
+	// If the snapshotter supports parallel unpacking and it is enabled for
+	if parallel {
+		h = tempUnpackHandler(h, a, unpackRoot)
+	}
 
 	doUnpackFn := func(i int, desc ocispec.Descriptor) error {
 		var parent string
@@ -421,7 +436,7 @@ func (u *Unpacker) unpack(
 			}
 
 			go func(i int) {
-				err := u.fetch(ctx, unpackHandler(h, unpack.Applier), layers[i:], fetchC)
+				err := u.fetch(ctx, h, layers[i:], fetchC)
 				if err != nil {
 					fetchErr <- err
 				}
@@ -441,24 +456,23 @@ func (u *Unpacker) unpack(
 		case <-fetchC[i-fetchOffset]:
 		}
 
-		// diff, err := a.Apply(ctx, desc, mounts, unpack.ApplyOpts...)
-		// if err != nil {
-		// 	cleanup.Do(ctx, abort)
-		// 	return fmt.Errorf("failed to extract layer (%s %s) to %s as %q: %w", desc.MediaType, desc.Digest, unpack.SnapshotterKey, key, err)
-		// }
-		// if diff.Digest != diffIDs[i] {
-		// 	cleanup.Do(ctx, abort)
-		// 	return fmt.Errorf("wrong diff id calculated on extraction %q", diffIDs[i])
-		// }
-
-		dgst, err := rebaseSnapshot(mounts, desc)
-		if err != nil {
-			cleanup.Do(ctx, abort)
-			return fmt.Errorf("failed to rebase layer %s: %w", desc.Digest, err)
+		var diff ocispec.Descriptor
+		if parallel {
+			diff, err = tempRebaseSnapshot(ctx, mounts, desc, unpackRoot)
+			if err != nil {
+				cleanup.Do(ctx, abort)
+				return fmt.Errorf("failed to rebase layer %s: %w", desc.Digest, err)
+			}
+		} else {
+			diff, err = a.Apply(ctx, desc, mounts, unpack.ApplyOpts...)
+			if err != nil {
+				cleanup.Do(ctx, abort)
+				return fmt.Errorf("failed to extract layer (%s %s) to %s as %q: %w", desc.MediaType, desc.Digest, unpack.SnapshotterKey, key, err)
+			}
 		}
-		if dgst != diffIDs[i] {
+		if diff.Digest != diffIDs[i] {
 			cleanup.Do(ctx, abort)
-			return fmt.Errorf("wrong diff id %q calculated on extraction %q", dgst, diffIDs[i])
+			return fmt.Errorf("wrong diff id %q calculated on extraction %q, desc %q", diff.Digest, diffIDs[i], desc.Digest)
 		}
 
 		if err = sn.Commit(ctx, chainID, key, opts...); err != nil {
@@ -622,130 +636,4 @@ func uniquePart() string {
 	// Ignore read failures, just decreases uniqueness
 	rand.Read(b[:])
 	return fmt.Sprintf("%d-%s", t.Nanosecond(), base64.URLEncoding.EncodeToString(b[:]))
-}
-
-func unpackHandler(h images.Handler, applier diff.Applier) images.HandlerFunc {
-	return images.HandlerFunc(func(ctx context.Context, desc ocispec.Descriptor) ([]ocispec.Descriptor, error) {
-		children, err := h.Handle(ctx, desc)
-		if err != nil {
-			return children, err
-		}
-
-		if images.IsLayerType(desc.MediaType) {
-			// TODO configure unpack directory
-			unpackDir := filepath.Join("/var/lib/containerd/unpack", uniquePart())
-			fsDir := filepath.Join(unpackDir, "fs")
-			mounts := []mount.Mount{
-				{
-					Type:    "overlay",
-					Source:  "overlay",
-					Options: []string{fmt.Sprintf("upperdir=%s", fsDir)},
-				},
-			}
-			if err := os.MkdirAll(fsDir, 0711); err != nil {
-				return nil, err
-			}
-			diff, err := applier.Apply(ctx, desc, mounts)
-			if err != nil {
-				return nil, err
-			}
-			if err := os.WriteFile(filepath.Join(unpackDir, "digest"), []byte(desc.Digest.String()), 0600); err != nil {
-				return nil, err
-			}
-			if err := os.WriteFile(filepath.Join(unpackDir, "diff"), []byte(diff.Digest.String()), 0600); err != nil {
-				return nil, err
-			}
-		}
-
-		return children, err
-	})
-}
-
-func getRebasePath(mounts []mount.Mount) (string, error) {
-	if len(mounts) == 1 {
-		switch mounts[0].Type {
-		case "overlay":
-			path, _, err := getOverlayPath(mounts[0].Options)
-			if err != nil {
-				return "", err
-			}
-			return path, nil
-		case "bind":
-			return mounts[0].Source, nil
-		}
-	}
-	return "", fmt.Errorf("unable to determine rebase path from mounts: %+v", mounts)
-}
-
-func getOverlayPath(options []string) (upper string, lower []string, err error) {
-	const upperdirPrefix = "upperdir="
-	const lowerdirPrefix = "lowerdir="
-
-	for _, o := range options {
-		if strings.HasPrefix(o, upperdirPrefix) {
-			upper = strings.TrimPrefix(o, upperdirPrefix)
-		} else if strings.HasPrefix(o, lowerdirPrefix) {
-			lower = strings.Split(strings.TrimPrefix(o, lowerdirPrefix), ":")
-		}
-	}
-	if upper == "" {
-		return "", nil, fmt.Errorf("upperdir not found: %w", errdefs.ErrInvalidArgument)
-	}
-
-	return
-}
-
-func rebaseSnapshot(mounts []mount.Mount, desc ocispec.Descriptor) (digest.Digest, error) {
-	dest, err := getRebasePath(mounts)
-	if err != nil {
-		return "", err
-	}
-	unpacks, err := os.ReadDir("/var/lib/containerd/unpack")
-	if err != nil {
-		return "", err
-	}
-	rebase := func(source, dest string) (digest.Digest, error) {
-		b, err := os.ReadFile(filepath.Join(source, "digest"))
-		if err != nil {
-			return "", err
-		}
-		dgst, err := digest.Parse(string(b))
-		if err != nil {
-			return "", err
-		}
-		if dgst != desc.Digest {
-			return "", fmt.Errorf("digest does not match")
-		}
-
-		if err := os.Rename(filepath.Join(source, "fs"), dest); err != nil {
-			return "", err
-		}
-
-		b, err = os.ReadFile(filepath.Join(source, "diff"))
-		if err != nil {
-			return "", err
-		}
-		diff, err := digest.Parse(string(b))
-		if err != nil {
-			return "", err
-		}
-
-		os.RemoveAll(source)
-		return diff, nil
-	}
-
-	if err := os.RemoveAll(dest); err != nil {
-		return "", err
-	}
-
-	for _, u := range unpacks {
-		if u.IsDir() {
-			dgst, err := rebase(filepath.Join("/var/lib/containerd/unpack", u.Name()), dest)
-			if err == nil {
-				return dgst, nil
-			}
-		}
-	}
-
-	return "", fmt.Errorf("unable to find unpacked layer for %s: %w", desc.Digest, errdefs.ErrNotFound)
 }
