@@ -337,6 +337,41 @@ func (u *Unpacker) unpack(
 		return u.fetch(ctx, h, layers, nil)
 	}
 
+	// pre-calculate chain ids for each layer
+	chainIDs := make([]digest.Digest, len(diffIDs))
+	copy(chainIDs, diffIDs)
+	chainIDs = identity.ChainIDs(chainIDs)
+
+	if u.supportParrallelUnpack(unpack) {
+		err = u.unpackParallel(ctx, h, config, layers, unpack, diffIDs)
+	} else {
+		err = u.unpackSequential(ctx, h, config, layers, unpack, diffIDs)
+	}
+	if err != nil {
+		return err
+	}
+
+	var chainID string
+	if len(chainIDs) > 0 {
+		chainID = chainIDs[len(chainIDs)-1].String()
+	}
+	log.G(ctx).WithFields(log.Fields{
+		"config":   config.Digest,
+		"chainID":  chainID,
+		"duration": time.Since(unpackStart),
+	}).Debug("image unpacked")
+
+	return nil
+}
+
+func (u *Unpacker) unpackSequential(
+	ctx context.Context,
+	h images.Handler,
+	config ocispec.Descriptor,
+	layers []ocispec.Descriptor,
+	unpack *Platform,
+	diffIDs []digest.Digest,
+) error {
 	u.unpacks.Add(1)
 
 	var (
@@ -347,9 +382,6 @@ func (u *Unpacker) unpack(
 		fetchOffset int
 		fetchC      []chan struct{}
 		fetchErr    chan error
-
-		parallel   = u.supportParrallelUnpack(unpack)
-		unpackRoot = tempUnpackRoot(unpack)
 	)
 
 	// If there is an early return, ensure any ongoing
@@ -361,11 +393,6 @@ func (u *Unpacker) unpack(
 	chainIDs := make([]digest.Digest, len(diffIDs))
 	copy(chainIDs, diffIDs)
 	chainIDs = identity.ChainIDs(chainIDs)
-
-	// If the snapshotter supports parallel unpacking and it is enabled for
-	if parallel {
-		h = tempUnpackHandler(h, a, unpackRoot)
-	}
 
 	doUnpackFn := func(i int, desc ocispec.Descriptor) error {
 		var parent string
@@ -456,19 +483,10 @@ func (u *Unpacker) unpack(
 		case <-fetchC[i-fetchOffset]:
 		}
 
-		var diff ocispec.Descriptor
-		if parallel {
-			diff, err = tempRebaseSnapshot(ctx, mounts, desc, unpackRoot)
-			if err != nil {
-				cleanup.Do(ctx, abort)
-				return fmt.Errorf("failed to rebase layer %s: %w", desc.Digest, err)
-			}
-		} else {
-			diff, err = a.Apply(ctx, desc, mounts, unpack.ApplyOpts...)
-			if err != nil {
-				cleanup.Do(ctx, abort)
-				return fmt.Errorf("failed to extract layer (%s %s) to %s as %q: %w", desc.MediaType, desc.Digest, unpack.SnapshotterKey, key, err)
-			}
+		diff, err := a.Apply(ctx, desc, mounts, unpack.ApplyOpts...)
+		if err != nil {
+			cleanup.Do(ctx, abort)
+			return fmt.Errorf("failed to extract layer (%s %s) to %s as %q: %w", desc.MediaType, desc.Digest, unpack.SnapshotterKey, key, err)
 		}
 		if diff.Digest != diffIDs[i] {
 			cleanup.Do(ctx, abort)
@@ -527,15 +545,212 @@ func (u *Unpacker) unpack(
 			fmt.Sprintf("containerd.io/gc.ref.snapshot.%s", unpack.SnapshotterKey): chainID,
 		},
 	}
-	_, err = cs.Update(ctx, cinfo, fmt.Sprintf("labels.containerd.io/gc.ref.snapshot.%s", unpack.SnapshotterKey))
+	_, err := cs.Update(ctx, cinfo, fmt.Sprintf("labels.containerd.io/gc.ref.snapshot.%s", unpack.SnapshotterKey))
 	if err != nil {
 		return err
 	}
-	log.G(ctx).WithFields(log.Fields{
-		"config":   config.Digest,
-		"chainID":  chainID,
-		"duration": time.Since(unpackStart),
-	}).Debug("image unpacked")
+
+	return nil
+}
+
+type unpackStatus struct {
+	err      error
+	commitFn func() error
+}
+
+func (u *Unpacker) unpackParallel(
+	ctx context.Context,
+	h images.Handler,
+	config ocispec.Descriptor,
+	layers []ocispec.Descriptor,
+	unpack *Platform,
+	diffIDs []digest.Digest,
+) error {
+	u.unpacks.Add(1)
+
+	var (
+		sn = unpack.Snapshotter
+		a  = unpack.Applier
+		cs = u.content
+	)
+
+	// If there is an early return, ensure any ongoing
+	// fetches get their context cancelled
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	// pre-calculate chain ids for each layer
+	chainIDs := make([]digest.Digest, len(diffIDs))
+	copy(chainIDs, diffIDs)
+	chainIDs = identity.ChainIDs(chainIDs)
+
+	errChs := make([]chan unpackStatus, len(layers))
+
+	doUnpackFn := func(i int, desc ocispec.Descriptor, usCh chan unpackStatus) {
+		chainID := chainIDs[i].String()
+		unlock, err := u.lockSnChainID(ctx, chainID, unpack.SnapshotterKey)
+		if err != nil {
+			usCh <- unpackStatus{err: err}
+			close(usCh)
+			return
+		}
+
+		// inherits annotations which are provided as snapshot labels.
+		snapshotLabels := snapshots.FilterInheritedLabels(desc.Annotations)
+		if snapshotLabels == nil {
+			snapshotLabels = make(map[string]string)
+		}
+		snapshotLabels[labelSnapshotRef] = chainID
+
+		var (
+			key    string
+			mounts []mount.Mount
+			opts   = append(unpack.SnapshotOpts, snapshots.WithLabels(snapshotLabels))
+		)
+
+		if err = func() error {
+			for try := 1; try <= 3; try++ {
+				// Prepare snapshot with from parent, label as root
+				key = fmt.Sprintf(snapshots.UnpackKeyFormat, uniquePart(), chainID)
+				mounts, err = sn.Prepare(ctx, key, "", opts...)
+				if err != nil {
+					if errdefs.IsAlreadyExists(err) {
+						if _, err := sn.Stat(ctx, chainID); err != nil {
+							if !errdefs.IsNotFound(err) {
+								return fmt.Errorf("failed to stat snapshot %s: %w", chainID, err)
+							}
+							// Try again, this should be rare, log it
+							log.G(ctx).WithField("key", key).WithField("chainid", chainID).Debug("extraction snapshot already exists, chain id not found")
+						} else {
+							// no need to handle, snapshot now found with chain id
+							return nil
+						}
+					} else {
+						return fmt.Errorf("failed to prepare extraction snapshot %q: %w", key, err)
+					}
+				} else {
+					break
+				}
+			}
+			if err != nil {
+				return fmt.Errorf("unable to prepare extraction snapshot: %w", err)
+			}
+
+			// Abort the snapshot if commit does not happen
+			abort := func(ctx context.Context) {
+				if err := sn.Remove(ctx, key); err != nil {
+					log.G(ctx).WithError(err).Errorf("failed to cleanup %q", key)
+				}
+			}
+
+			if err = u.fetch(ctx, h, layers[i:i], nil); err != nil {
+				return err
+			}
+
+			diff, err := a.Apply(ctx, desc, mounts, unpack.ApplyOpts...)
+			if err != nil {
+				cleanup.Do(ctx, abort)
+				return fmt.Errorf("failed to extract layer (%s %s) to %s as %q: %w", desc.MediaType, desc.Digest, unpack.SnapshotterKey, key, err)
+			}
+
+			if diff.Digest != diffIDs[i] {
+				cleanup.Do(ctx, abort)
+				return fmt.Errorf("wrong diff id %q calculated on extraction %q, desc %q", diff.Digest, diffIDs[i], desc.Digest)
+			}
+
+			return nil
+		}(); err != nil {
+			unlock()
+			usCh <- unpackStatus{err: err}
+			close(usCh)
+			return
+		}
+
+		commitFn := func() error {
+			defer unlock()
+			// Abort the snapshot if commit does not happen
+			abort := func(ctx context.Context) {
+				if err := sn.Remove(ctx, key); err != nil {
+					log.G(ctx).WithError(err).Errorf("failed to cleanup %q", key)
+				}
+			}
+			if i > 0 {
+				parent := chainIDs[i-1].String()
+				opts = append(opts, snapshots.WithParent(parent))
+			}
+			if err = sn.Commit(ctx, chainID, key, opts...); err != nil {
+				cleanup.Do(ctx, abort)
+				if errdefs.IsAlreadyExists(err) {
+					return nil
+				}
+				return fmt.Errorf("failed to commit snapshot %s: %w", key, err)
+			}
+
+			// Set the uncompressed label after the uncompressed
+			// digest has been verified through apply.
+			cinfo := content.Info{
+				Digest: desc.Digest,
+				Labels: map[string]string{
+					labels.LabelUncompressed: diffIDs[i].String(),
+				},
+			}
+			if _, err := cs.Update(ctx, cinfo, "labels."+labels.LabelUncompressed); err != nil {
+				return err
+			}
+			return nil
+		}
+
+		usCh <- unpackStatus{commitFn: commitFn}
+		close(usCh)
+	}
+
+	// fetch and unpack layers in parallel
+	for i, desc := range layers {
+		// _, layerSpan := tracing.StartSpan(ctx, tracing.Name(unpackSpanPrefix, "unpackLayer"))
+		// unpackLayerStart := time.Now()
+		// layerSpan.SetAttributes(
+		// 	tracing.Attribute("layer.media.type", desc.MediaType),
+		// 	tracing.Attribute("layer.media.size", desc.Size),
+		// 	tracing.Attribute("layer.media.digest", desc.Digest.String()),
+		// )
+		// if err := doUnpackFn(i, desc); err != nil {
+		// 	layerSpan.SetStatus(err)
+		// 	layerSpan.End()
+		// 	return err
+		// }
+		go doUnpackFn(i, desc, errChs[i])
+		// layerSpan.End()
+		// log.G(ctx).WithFields(log.Fields{
+		// 	"layer":    desc.Digest,
+		// 	"duration": time.Since(unpackLayerStart),
+		// }).Debug("layer unpacked")
+	}
+
+	// commit layers in order
+	for i := range layers {
+		st := <-errChs[i]
+		if st.err != nil {
+			return st.err
+		}
+		if err := st.commitFn(); err != nil {
+			return err
+		}
+	}
+
+	var chainID string
+	if len(chainIDs) > 0 {
+		chainID = chainIDs[len(chainIDs)-1].String()
+	}
+	cinfo := content.Info{
+		Digest: config.Digest,
+		Labels: map[string]string{
+			fmt.Sprintf("containerd.io/gc.ref.snapshot.%s", unpack.SnapshotterKey): chainID,
+		},
+	}
+	_, err := cs.Update(ctx, cinfo, fmt.Sprintf("labels.containerd.io/gc.ref.snapshot.%s", unpack.SnapshotterKey))
+	if err != nil {
+		return err
+	}
 
 	return nil
 }

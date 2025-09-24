@@ -395,3 +395,10 @@ func FilterInheritedLabels(labels map[string]string) map[string]string {
 	}
 	return filtered
 }
+
+func WithParent(parent string) Opt {
+	return func(info *Info) error {
+		info.Parent = parent
+		return nil
+	}
+}

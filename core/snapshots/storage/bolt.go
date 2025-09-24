@@ -386,6 +386,10 @@ func CommitActive(ctx context.Context, key, name string, usage snapshots.Usage, 
 		// Replace labels, do not inherit
 		si.Labels = base.Labels
 
+		if si.Parent == "" && base.Parent != "" {
+			si.Parent = base.Parent
+		}
+
 		if err := putSnapshot(dbkt, id, si); err != nil {
 			return err
 		}
