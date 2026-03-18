@@ -80,6 +80,7 @@ type Platform struct {
 	SnapshotterCapabilities []string
 
 	Applier   diff.Applier
+	ApplierID string
 	ApplyOpts []diff.ApplyOpt
 
 	// ConfigType is the supported config type to be considered for unpacking
@@ -730,6 +731,9 @@ func (u *Unpacker) makeBlobDescriptorKey(desc ocispec.Descriptor) string {
 }
 
 func (u *Unpacker) supportParallel(unpack *Platform) bool {
+	// blacklist certain appliers which are known to not support parallel unpacking
+	var blacklist = []string{"walking"}
+
 	if u.unpackLimiter == nil {
 		return false
 	}
@@ -737,6 +741,11 @@ func (u *Unpacker) supportParallel(unpack *Platform) bool {
 		log.L.Infof("snapshotter does not support rebase capability, unpacking will be sequential")
 		return false
 	}
+	if slices.Contains(blacklist, unpack.ApplierID) {
+		log.L.Infof("applier %q does not support parallel unpacking, unpacking will be sequential", unpack.ApplierID)
+		return false
+	}
+
 	return true
 }
 
