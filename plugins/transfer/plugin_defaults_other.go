@@ -21,6 +21,7 @@ package transfer
 import (
 	"github.com/containerd/containerd/v2/defaults"
 	"github.com/containerd/platforms"
+	"github.com/moby/sys/userns"
 )
 
 func defaultUnpackConfig() []unpackConfiguration {
@@ -28,7 +29,14 @@ func defaultUnpackConfig() []unpackConfiguration {
 		{
 			Platform:    platforms.Format(platforms.DefaultSpec()),
 			Snapshotter: defaults.DefaultSnapshotter,
-			Differ:      defaults.DefaultDiffer,
+			Differ:      preferredApplier(),
 		},
 	}
+}
+
+func preferredApplier() string {
+	if userns.RunningInUserNS() {
+		return "walking"
+	}
+	return defaults.DefaultDiffer
 }

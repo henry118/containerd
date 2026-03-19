@@ -31,7 +31,6 @@ import (
 	"github.com/containerd/containerd/v2/core/metadata"
 	"github.com/containerd/containerd/v2/core/transfer/local"
 	"github.com/containerd/containerd/v2/core/unpack"
-	"github.com/containerd/containerd/v2/defaults"
 	"github.com/containerd/containerd/v2/internal/kmutex"
 	"github.com/containerd/containerd/v2/pkg/imageverifier"
 	"github.com/containerd/containerd/v2/plugins"
@@ -140,7 +139,7 @@ func init() {
 							skippedApplier := plugin.Registration.ID
 
 							// Prefer the default when multiple plugins match
-							if skippedApplier == defaults.DefaultDiffer {
+							if skippedApplier == preferredApplier() {
 								skippedApplier = applierID
 							}
 

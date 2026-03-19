@@ -18,7 +18,15 @@
 
 package diff
 
-var defaultDifferConfig = &config{
-	Order:  []string{"walking"},
-	SyncFs: false,
+import "github.com/moby/sys/userns"
+
+func defaultDifferConfig() *config {
+	c := &config{
+		Order:  []string{"overlay", "walking"},
+		SyncFs: false,
+	}
+	if userns.RunningInUserNS() {
+		c.Order = []string{"walking"}
+	}
+	return c
 }

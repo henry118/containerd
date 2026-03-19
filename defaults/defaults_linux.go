@@ -34,5 +34,5 @@ const (
 	// transient data
 	DefaultStateDir = "/run/containerd"
 	// DefaultDiffer will set the default differ for the platform.
-	DefaultDiffer = "walking"
+	DefaultDiffer = "overlay"
 )

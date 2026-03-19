@@ -30,3 +30,7 @@ func defaultUnpackConfig() []unpackConfiguration {
 		},
 	}
 }
+
+func preferredApplier() string {
+	return defaults.DefaultDiffer
+}

@@ -16,7 +16,9 @@
 
 package diff
 
-var defaultDifferConfig = &config{
-	Order:  []string{"erofs", "walking"},
-	SyncFs: false,
+func defaultDifferConfig() *config {
+	return &config{
+		Order:  []string{"erofs", "walking"},
+		SyncFs: false,
+	}
 }
