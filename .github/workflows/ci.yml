@@ -5,6 +5,7 @@ on:
   merge_group:
   pull_request:
     branches: ['main', 'release/**']
+  workflow_dispatch:
 
 permissions: # added using https://github.com/step-security/secure-workflows
   contents: read
